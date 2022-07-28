@@ -1,0 +1,6 @@
+[submodule "3rdparty/unordered_dense"]
+	path = 3rdparty/unordered_dense
+	url = https://github.com/jcelerier/unordered_dense
+[submodule "3rdparty/readerwriterqueue"]
+	path = 3rdparty/readerwriterqueue
+	url = git@github.com:cameron314/readerwriterqueue
