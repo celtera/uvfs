@@ -18,7 +18,7 @@ struct mmap_handle
   T bytes{};
   int64_t sz{};
 
-  mmap_handle(T b, int64_t sz): bytes{b}, sz{sz} { }
+  mmap_handle(T b, int64_t size): bytes{b}, sz{size} { }
   mmap_handle() = default;
   mmap_handle(const mmap_handle&) = delete;
   auto operator=(const mmap_handle&) -> mmap_handle& = delete;
@@ -35,7 +35,11 @@ struct mmap_handle
     other.bytes = nullptr;
     return *this;
   }
-  ~mmap_handle() { if(bytes) munmap((void*)(bytes), sz); }
+  ~mmap_handle()
+  {
+    if (bytes)
+      munmap(const_cast<void*>(static_cast<const void*>(bytes)), sz);
+  }
 };
 
 struct fd_handle

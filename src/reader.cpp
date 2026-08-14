@@ -52,7 +52,7 @@ try : impl{std::make_unique<struct impl>(path)}
   {
     const auto* const e = reinterpret_cast<const entry*>(ptr + entry_idx);
 
-    impl->entries[std::string_view(e->path, e->path_len)] = loaded_file_entry{
+    impl->entries[std::string_view(e->path_bytes(), e->path_len)] = loaded_file_entry{
         .start = e->data_start,
         .len = e->data_size,
         .data = (data.bytes + h->data_start + e->data_start)};
@@ -82,7 +82,7 @@ reader::~reader() = default;
 auto reader::find(std::string_view path) const noexcept
     -> std::optional<std::string_view>
 {
-  assert(idx);
+  assert(impl);
   auto it = impl->entries.find(path);
   if (it == impl->entries.end())
     return std::nullopt;

@@ -48,7 +48,18 @@ struct entry
   int64_t data_start;
   int64_t data_size;
   int32_t path_len;
-  char path[];
+  // The path bytes follow immediately after the fixed fields. A flexible array
+  // member would be the natural spelling but is not standard C++, so the bytes
+  // are reached explicitly instead.
+
+  [[nodiscard]] auto path_bytes() const noexcept -> const char*
+  {
+    return reinterpret_cast<const char*>(this) + static_size;
+  }
+  [[nodiscard]] auto path_bytes() noexcept -> char*
+  {
+    return reinterpret_cast<char*>(this) + static_size;
+  }
 };
 
 struct header

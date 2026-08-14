@@ -134,7 +134,7 @@ try
     e_file->data_start = e.target_offset;
     e_file->data_size = e.size;
     e_file->path_len = std::ssize(e.path_in_archive);
-    memcpy(e_file->path, e.path_in_archive.data(), e.path_in_archive.size());
+    memcpy(e_file->path_bytes(), e.path_in_archive.data(), e.path_in_archive.size());
 
     entry_pos
         = round_up_8(entry_pos + entry::static_size + std::ssize(e.path_in_archive));
