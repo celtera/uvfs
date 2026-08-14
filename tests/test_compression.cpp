@@ -10,6 +10,8 @@
 
 using namespace uvfs::test;
 
+#if defined(UVFS_HAS_ZSTD)
+
 namespace
 {
 //! Highly compressible: long runs and a small alphabet, like text or config.
@@ -42,8 +44,6 @@ auto write_blob(const scratch_dir& dir, std::string_view leaf, const std::string
   return dir.make_text(leaf, data);
 }
 } // namespace
-
-#if defined(UVFS_HAS_ZSTD)
 
 UVFS_TEST("compression/roundtrips_every_payload")
 {

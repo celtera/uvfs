@@ -97,8 +97,10 @@ void parallel_for(int64_t n, int requested_threads, F&& body, int cap = 0)
         });
 }
 
+#if defined(UVFS_HAS_ZSTD)
 //! Reads a whole file. Returns false and fills `error` rather than throwing,
-//! because this runs on worker threads.
+//! because this runs on worker threads. Only the compression path needs it;
+//! the store path copies straight into the mapping.
 [[nodiscard]] auto read_file(
     const std::string& path, int64_t expected, std::vector<char>& out,
     std::string& error) -> bool
@@ -139,6 +141,7 @@ void parallel_for(int64_t n, int requested_threads, F&& body, int cap = 0)
     return false;
   }
 }
+#endif // UVFS_HAS_ZSTD
 
 //! Above this size a payload is copied by the kernel with copy_file_range
 //! instead of being pulled through user space. Below it the extra syscall
@@ -224,6 +227,7 @@ constexpr int64_t sample_bytes = 256 * 1024;
 //! Chunk size when streaming a payload too large to hold in memory.
 constexpr int64_t stream_chunk = 4 * 1024 * 1024;
 
+#if defined(UVFS_HAS_ZSTD)
 [[nodiscard]] auto worth_keeping(
     int64_t compressed, int64_t original, const compression_settings& cs) noexcept
     -> bool
@@ -237,8 +241,6 @@ constexpr int64_t stream_chunk = 4 * 1024 * 1024;
   const int64_t saved = original - compressed;
   return saved * 100 >= original * cs.min_gain_percent;
 }
-
-#if defined(UVFS_HAS_ZSTD)
 
 using cdict_ptr = std::unique_ptr<ZSTD_CDict, size_t (*)(ZSTD_CDict*)>;
 

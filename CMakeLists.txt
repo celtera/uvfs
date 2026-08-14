@@ -13,6 +13,7 @@ endif()
 option(UVFS_BUILD_TESTS "Build the uvfs test suite" ${UVFS_IS_TOP_LEVEL})
 option(UVFS_BUILD_TOOLS "Build the uvfs command line tools" ${UVFS_IS_TOP_LEVEL})
 option(UVFS_BUILD_BENCHMARKS "Build the uvfs benchmarks" OFF)
+option(UVFS_BUILD_FUZZERS "Build libFuzzer targets (clang only)" OFF)
 option(UVFS_LTO "Enable link-time optimization" OFF)
 set(UVFS_SANITIZE "" CACHE STRING
     "Sanitizers to enable, e.g. 'address,undefined' (GCC/Clang only)")
@@ -123,7 +124,7 @@ target_link_libraries(uvfs_writer PUBLIC Threads::Threads)
 # --------------------------------------------------------------------- tools
 if(UVFS_BUILD_TOOLS)
   add_executable(uvfs src/archiver.cpp)
-  target_link_libraries(uvfs PRIVATE uvfs_writer $<BUILD_INTERFACE:uvfs_build_settings>)
+  target_link_libraries(uvfs PRIVATE uvfs_reader uvfs_writer $<BUILD_INTERFACE:uvfs_build_settings>)
 endif()
 
 # --------------------------------------------------------------------- tests
@@ -152,6 +153,18 @@ if(UVFS_BUILD_TESTS)
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_include_directories(uvfs_tests SYSTEM PRIVATE ${UVFS_XXHASH_INC})
   add_test(NAME uvfs_tests COMMAND uvfs_tests)
+endif()
+
+# ------------------------------------------------------------------- fuzzers
+if(UVFS_BUILD_FUZZERS)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "uvfs: UVFS_BUILD_FUZZERS requires clang (libFuzzer)")
+  endif()
+  add_executable(uvfs_fuzz_reader tests/fuzz_reader.cpp)
+  target_link_libraries(uvfs_fuzz_reader
+    PRIVATE uvfs_reader $<BUILD_INTERFACE:uvfs_build_settings>)
+  target_compile_options(uvfs_fuzz_reader PRIVATE -fsanitize=fuzzer)
+  target_link_options(uvfs_fuzz_reader PRIVATE -fsanitize=fuzzer)
 endif()
 
 # ---------------------------------------------------------------- benchmarks
