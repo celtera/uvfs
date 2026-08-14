@@ -163,35 +163,33 @@ UVFS_TEST("path/replace_keeps_registration_order_stable")
   }
 }
 
-UVFS_TEST("path/reader_rejects_duplicate_entries_in_index")
+UVFS_TEST("path/writer_is_the_thing_that_prevents_duplicates")
 {
-  // Hand-build the duplicate the writer now refuses to produce, by copying an
-  // archive's single index entry over its neighbour.
-  scratch_dir dir{"dup-index"};
+  // Version 1 walked the whole index at open and built a heap map, so it could
+  // notice a duplicate on the way past. Version 2 deliberately does no work at
+  // open, so that check is gone from the reader. Duplicates are instead
+  // prevented where they can actually occur: the writer refuses to emit them.
+  // A duplicate appearing in a written archive would be corruption, which is
+  // what the index hash is for (see integrity tests).
+  scratch_dir dir{"dup-writer"};
   const auto arc = dir / "out.uvfs";
+
   uvfs::writer w;
   w.add_file("/aa", dir.make_file("a", 32, 1));
   w.add_file("/bb", dir.make_file("b", 32, 2));
-  w.commit(arc);
+  w.add_file("/aa", dir.make_file("c", 32, 3));
+  CHECK_THROWS(w.commit(arc));
+  CHECK(!std::filesystem::exists(arc));
 
-  std::string bytes;
-  {
-    std::ifstream f(arc, std::ios::binary);
-    bytes.assign(
-        std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
-  }
-  // Both entries are static_size(20) + 3 path bytes -> rounded to 24 each.
-  const std::size_t index_start = 64;
-  const std::size_t stride = 24;
-  // Make the second entry's path identical to the first's.
-  bytes[index_start + stride + 20] = bytes[index_start + 20];
-  bytes[index_start + stride + 21] = bytes[index_start + 21];
-  bytes[index_start + stride + 22] = bytes[index_start + 22];
-
-  const auto bad = dir / "bad.uvfs";
-  {
-    std::ofstream f(bad, std::ios::binary | std::ios::trunc);
-    f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-  }
-  CHECK_THROWS(uvfs::reader{bad});
+  // And what it does emit is always internally consistent.
+  uvfs::writer ok;
+  ok.add_file("/aa", dir.make_file("a2", 32, 1));
+  ok.add_file("/bb", dir.make_file("b2", 32, 2));
+  ok.commit(arc);
+  uvfs::reader r{arc};
+  CHECK_EQ(r.size(), std::size_t{2});
+  CHECK_EQ(r.count(), int64_t{2});
+  // Sorted order is part of the format now.
+  CHECK(r.at(0).path == "/aa");
+  CHECK(r.at(1).path == "/bb");
 }

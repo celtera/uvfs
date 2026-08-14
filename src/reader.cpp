@@ -1,11 +1,9 @@
 #include "fd_handle.hpp"
 #include "format.hpp"
+#include "hash.hpp"
 
-#include <ankerl/unordered_dense.h>
 #include <uvfs/reader.hpp>
 
-#include <array>
-#include <bit>
 #include <cassert>
 #include <cstring>
 #include <stdexcept>
@@ -13,11 +11,7 @@
 
 namespace uvfs
 {
-struct loaded_file_entry
-{
-  int64_t len{};
-  const char* data{};
-};
+
 struct reader::impl
 {
   explicit impl(std::string_view path)
@@ -25,63 +19,127 @@ struct reader::impl
   {
   }
 
-  ankerl::unordered_dense::map<std::string_view, loaded_file_entry> entries;
   fd_handle handle;
-  decltype(handle.map_ro(1)) data;
+  mmap_handle<const char*> map;
+
+  header h{};
+  const char* index{};    //!< start of the index region
+  const char* entries{};  //!< entry array, sorted by name
+  const char* table{};    //!< hash table slots
+  const char* hashes{};   //!< per-entry content hashes, or null
+  const char* names{};    //!< name blob
+  const char* payloads{}; //!< start of the data region
+
+  [[nodiscard]] auto entry_at(int64_t i) const noexcept -> entry
+  {
+    return entry::load_from(entries + i * entry_size);
+  }
+
+  // Opening does not walk the index -- that is the whole point of the format --
+  // so entries are checked where they are used instead. These are a handful of
+  // comparisons against values already in registers, and they are what keeps a
+  // corrupt archive from turning into an out-of-bounds read. Integrity of the
+  // index as a whole is a separate question, answered by its hash.
+  [[nodiscard]] auto sane(const entry& e) const noexcept -> bool
+  {
+    if (e.name_size == 0)
+      return false;
+    const auto name_at_off = static_cast<int64_t>(e.name_offset);
+    if (name_at_off > h.names_size
+        || static_cast<int64_t>(e.name_size) > h.names_size - name_at_off)
+      return false;
+
+    if (e.data_offset < 0 || e.stored_size < 0 || e.orig_size < 0)
+      return false;
+    if (e.data_offset > h.data_size
+        || e.stored_size > h.data_size - e.data_offset)
+      return false;
+
+    switch (e.method)
+    {
+      case codec::store:
+        // A stored payload is the file, so the two sizes must agree.
+        return e.orig_size == e.stored_size;
+      case codec::zstd:
+        return true;
+      case codec::zstd_dict:
+        return h.has(flag_has_dictionary);
+    }
+    return false; // unknown codec
+  }
+
+  [[nodiscard]] auto name_at(const entry& e) const noexcept -> std::string_view
+  {
+    return {names + e.name_offset, e.name_size};
+  }
+
+  [[nodiscard]] auto checked_entry_at(int64_t i) const -> entry
+  {
+    const entry e = entry_at(i);
+    if (!sane(e))
+      throw std::runtime_error(
+          "uvfs: index entry " + std::to_string(i)
+          + " points outside the archive (corrupt index)");
+    return e;
+  }
+
+  //! Open addressing with linear probing. The 32-bit fingerprint stored beside
+  //! the entry index means a probe that hits an occupied but different slot is
+  //! rejected without touching the entry or the name blob, which is what keeps
+  //! the cost at roughly one cache miss.
+  [[nodiscard]] auto lookup(std::string_view path) const noexcept -> int64_t
+  {
+    if (h.table_capacity == 0)
+      return -1;
+    const uint64_t hv = hash_name(path);
+    const uint64_t fingerprint = hv >> 32;
+    const auto mask = static_cast<uint64_t>(h.table_capacity - 1);
+    uint64_t slot = hv & mask;
+    for (;;)
+    {
+      const uint64_t s = load<uint64_t>(table + slot * 8);
+      if (s == empty_slot)
+        return -1;
+      if ((s >> 32) == fingerprint)
+      {
+        const auto i = static_cast<int64_t>(static_cast<uint32_t>(s));
+        if (i < h.file_count)
+        {
+          const entry e = entry_at(i);
+          // sane() first: comparing the name reads the blob.
+          if (sane(e) && e.name_size == path.size()
+              && memcmp(names + e.name_offset, path.data(), path.size()) == 0)
+            return i;
+        }
+      }
+      slot = (slot + 1) & mask;
+    }
+  }
 };
 
 reader::reader(std::string_view path)
 try : impl{std::make_unique<struct impl>(path)}
 {
   const auto filesize = impl->handle.filesize();
-  if (filesize < static_cast<int64_t>(sizeof(header)))
-    throw std::runtime_error("uvfs: invalid file size: ");
+  if (filesize < header_size)
+    throw std::runtime_error("uvfs: file is smaller than a header: ");
 
-  impl->data = impl->handle.map_ro(filesize);
-  auto& data = impl->data;
+  impl->map = impl->handle.map_ro(filesize);
+  const char* const base = impl->map.bytes;
 
-  const header h = header::load_from(data.bytes);
-  h.validate(filesize);
+  impl->h = header::load_from(base);
+  impl->h.validate(filesize);
 
-  const auto* const index = data.bytes + h.index_start;
-  const auto* const payloads = data.bytes + h.data_start;
-  impl->entries.reserve(h.file_count);
-
-  int64_t entry_idx = 0;
-  for (int64_t i = 0; i < h.file_count; i++)
-  {
-    // Every field below is checked before it is used to form a pointer or a
-    // view. Reading first and validating afterwards would mean the corrupt
-    // value had already been dereferenced.
-    if (entry_idx > h.index_size - entry::static_size)
-      throw std::runtime_error("uvfs: index entry extends past the index: ");
-
-    const auto* const raw = index + entry_idx;
-    const entry e = entry::load_from(raw);
-
-    const int64_t path_len = e.path_len;
-    if (path_len <= 0)
-      throw std::runtime_error("uvfs: entry has a non-positive path length: ");
-    if (path_len > h.index_size - entry_idx - entry::static_size)
-      throw std::runtime_error("uvfs: entry path extends past the index: ");
-
-    if (e.data_start < 0 || e.data_size < 0)
-      throw std::runtime_error("uvfs: entry has a negative offset or size: ");
-    if (e.data_start > h.data_size || e.data_size > h.data_size - e.data_start)
-      throw std::runtime_error("uvfs: entry payload extends past the data region: ");
-
-    const std::string_view name(
-        entry::path_of(raw), static_cast<size_t>(path_len));
-    const auto [it, inserted] = impl->entries.try_emplace(
-        name, loaded_file_entry{.len = e.data_size, .data = payloads + e.data_start});
-    if (!inserted)
-      throw std::runtime_error(
-          "uvfs: archive lists \"" + std::string{name}
-          + "\" more than once, so file_count disagrees with what is "
-            "reachable: ");
-
-    entry_idx = round_up_8(entry_idx + entry::static_size + path_len);
-  }
+  // Opening is exactly this: map, check the header, take pointers. There is
+  // no loop over the entries -- the index is already an index.
+  const header& h = impl->h;
+  impl->index = base + h.index_start;
+  impl->entries = impl->index;
+  impl->table = impl->index + h.table_offset();
+  impl->hashes
+      = h.has(flag_entry_hashes) ? impl->index + h.hashes_offset() : nullptr;
+  impl->names = impl->index + h.names_offset();
+  impl->payloads = base + h.data_start;
 }
 catch (const std::runtime_error& e)
 {
@@ -89,30 +147,140 @@ catch (const std::runtime_error& e)
 }
 
 reader::~reader() = default;
+reader::reader(reader&&) noexcept = default;
+auto reader::operator=(reader&&) noexcept -> reader& = default;
 
-auto reader::find(std::string_view path) const noexcept
-    -> std::optional<std::string_view>
+auto reader::size() const noexcept -> std::size_t
 {
-  assert(impl);
-  auto it = impl->entries.find(path);
-  if (it == impl->entries.end())
-    return std::nullopt;
-  else
-    return std::string_view(it->second.data, it->second.len);
+  return static_cast<std::size_t>(impl->h.file_count);
 }
 
-void reader::for_each_file(const std::function<bool(iter_entry)>& func) const
+auto reader::count() const noexcept -> int64_t
 {
-  for (auto& f : this->impl->entries)
+  return impl->h.file_count;
+}
+
+auto reader::has_content_hashes() const noexcept -> bool
+{
+  return impl->hashes != nullptr;
+}
+
+namespace
+{
+auto to_info(std::string_view name, const entry& e) noexcept -> file_info
+{
+  return file_info{
+      .path = name,
+      .size = e.orig_size,
+      .stored_size = e.stored_size,
+      .storage = e.method == codec::store ? stored_as::raw : stored_as::compressed};
+}
+} // namespace
+
+auto reader::at(int64_t i) const -> file_info
+{
+  if (i < 0 || i >= impl->h.file_count)
+    throw std::out_of_range(
+        "uvfs: entry index " + std::to_string(i) + " is out of range");
+  const entry e = impl->checked_entry_at(i);
+  return to_info(impl->name_at(e), e);
+}
+
+auto reader::stat(std::string_view path) const noexcept -> std::optional<file_info>
+{
+  const auto i = impl->lookup(path);
+  if (i < 0)
+    return std::nullopt;
+  const entry e = impl->entry_at(i);
+  return to_info(impl->name_at(e), e);
+}
+
+auto reader::find(std::string_view path) const noexcept
+    -> std::optional<byte_array>
+{
+  const auto i = impl->lookup(path);
+  if (i < 0)
+    return std::nullopt;
+  const entry e = impl->entry_at(i);
+  if (e.method != codec::store)
+    return std::nullopt; // no verbatim bytes to point at
+  return byte_array(
+      impl->payloads + e.data_offset, static_cast<std::size_t>(e.stored_size));
+}
+
+void reader::for_each_file(function_ref<bool(iter_entry)> func) const
+{
+  const int64_t n = impl->h.file_count;
+  for (int64_t i = 0; i < n; i++)
   {
-    if (!func({f.first, std::string_view(f.second.data, f.second.len)}))
+    const entry e = impl->checked_entry_at(i);
+    const auto name = impl->name_at(e);
+    const auto bytes
+        = e.method == codec::store
+              ? byte_array(
+                    impl->payloads + e.data_offset,
+                    static_cast<std::size_t>(e.stored_size))
+              : byte_array{};
+    if (!func(iter_entry{name, bytes}))
       break;
   }
 }
 
-auto reader::size() const noexcept -> std::size_t
+auto reader::read_into(std::string_view path, char* out, int64_t capacity) const
+    -> std::optional<int64_t>
 {
-  return this->impl->entries.size();
+  const auto i = impl->lookup(path);
+  if (i < 0)
+    return std::nullopt;
+  const entry e = impl->entry_at(i);
+  if (capacity < e.orig_size)
+    throw std::runtime_error(
+        "uvfs: buffer of " + std::to_string(capacity) + " bytes is too small for "
+        + std::string{path} + " (" + std::to_string(e.orig_size) + " bytes)");
+
+  if (e.method == codec::store)
+  {
+    if (e.orig_size > 0)
+      memcpy(out, impl->payloads + e.data_offset, static_cast<size_t>(e.orig_size));
+    return e.orig_size;
+  }
+  throw std::runtime_error(
+      "uvfs: " + std::string{path}
+      + " is compressed but this build has no decompression support");
+}
+
+auto reader::read(std::string_view path) const -> std::optional<std::vector<char>>
+{
+  const auto info = stat(path);
+  if (!info)
+    return std::nullopt;
+  std::vector<char> out(static_cast<std::size_t>(info->size));
+  const auto n = read_into(path, out.data(), static_cast<int64_t>(out.size()));
+  if (!n)
+    return std::nullopt;
+  return out;
+}
+
+auto reader::verify() const -> std::vector<std::string>
+{
+  std::vector<std::string> bad;
+  if (!impl->hashes)
+    return bad;
+
+  const int64_t n = impl->h.file_count;
+  for (int64_t i = 0; i < n; i++)
+  {
+    const entry e = impl->checked_entry_at(i);
+    const auto want = load<uint64_t>(impl->hashes + i * 8);
+    // Hash the bytes as they sit in the archive: that detects damage without
+    // paying for decompression, and a compressed payload that survives its
+    // hash decompresses to the right thing.
+    const auto got = hash_bytes(
+        impl->payloads + e.data_offset, static_cast<std::size_t>(e.stored_size));
+    if (got != want)
+      bad.emplace_back(impl->name_at(e));
+  }
+  return bad;
 }
 
 }

@@ -1,5 +1,6 @@
 #include "fd_handle.hpp"
 #include "format.hpp"
+#include "hash.hpp"
 
 #include <uvfs/path.hpp>
 #include <uvfs/writer.hpp>
@@ -29,6 +30,7 @@ struct placed
   const pending* src{};
   int64_t size{};
   int64_t target_offset{};
+  int64_t name_offset{};
 };
 
 //! Removes a file, ignoring failure. Used on the error path, where the
@@ -188,22 +190,39 @@ void writer::commit(std::string_view path)
   }
 
   // ---------------------------------------------------------------- layout
+  if (std::ssize(plan) > max_file_count)
+    throw std::invalid_argument(
+        "uvfs: " + std::to_string(plan.size())
+        + " files exceeds the format's limit of "
+        + std::to_string(max_file_count));
+
+  // Entries are stored sorted by archive path. That is what makes the entry
+  // array binary searchable and makes iteration come out in extraction order.
+  std::sort(
+      plan.begin(), plan.end(),
+      [](const placed& a, const placed& b)
+      { return a.src->path_in_archive < b.src->path_in_archive; });
+
   header h{};
   memcpy(h.head, uvfs::ident, sizeof(uvfs::ident));
 
-  int64_t index_size = 0;
+  int64_t names_size = 0;
   int64_t data_size = 0;
   for (auto& p : plan)
   {
-    index_size = round_up_8(
-        index_size + entry::static_size + std::ssize(p.src->path_in_archive));
-    p.target_offset = data_size;
-    data_size = round_up_64(data_size + p.size);
+    p.name_offset = names_size;
+    names_size += std::ssize(p.src->path_in_archive);
+
+    // Stored payloads carry the 64-byte alignment promise.
+    p.target_offset = round_up(data_size, payload_alignment);
+    data_size = p.target_offset + p.size;
   }
 
   h.file_count = std::ssize(plan);
-  h.index_start = round_up_64(ssizeof<header>);
-  h.index_size = index_size;
+  h.table_capacity = table_capacity_for(h.file_count);
+  h.names_size = names_size;
+  h.index_start = round_up_64(header_size);
+  h.index_size = h.names_offset() + names_size;
   h.data_start = round_up_64(h.index_start + h.index_size);
   h.data_size = data_size;
   h.file_size = h.data_start + h.data_size;
@@ -231,20 +250,42 @@ void writer::commit(std::string_view path)
       h.store_to(data.bytes);
 
       // ------------------------------------------------------------- index
+      // The index is written in its final, ready-to-use form: a sorted entry
+      // array, a populated hash table and a name blob. A reader maps the file
+      // and uses them directly; none of this is recomputed at open.
       auto* const index = data.bytes + h.index_start;
-      int64_t entry_pos = 0;
-      for (const auto& p : plan)
+      auto* const table = index + h.table_offset();
+      auto* const names = index + h.names_offset();
+
+      for (int64_t i = 0; i < h.table_capacity; i++)
+        store<uint64_t>(table + i * 8, empty_slot);
+
+      const auto mask = static_cast<uint64_t>(h.table_capacity - 1);
+      for (int64_t i = 0; i < h.file_count; i++)
       {
+        const auto& p = plan[static_cast<std::size_t>(i)];
         const auto& name = p.src->path_in_archive;
-        auto* const raw = index + entry_pos;
+
         const entry e{
-            .data_start = p.target_offset,
-            .data_size = p.size,
-            .path_len = static_cast<int32_t>(std::ssize(name))};
-        e.store_to(raw);
-        memcpy(entry::path_of(raw), name.data(), name.size());
-        entry_pos
-            = round_up_8(entry_pos + entry::static_size + std::ssize(name));
+            .data_offset = p.target_offset,
+            .stored_size = p.size,
+            .orig_size = p.size,
+            .name_offset = static_cast<uint32_t>(p.name_offset),
+            .name_size = static_cast<uint16_t>(name.size()),
+            .method = codec::store};
+        e.store_to(index + i * entry_size);
+        memcpy(names + p.name_offset, name.data(), name.size());
+
+        // Insert into the open-addressed table. The high 32 bits of the hash
+        // ride along as a fingerprint so a lookup can reject a colliding slot
+        // without dereferencing the entry or the name.
+        const uint64_t hv = hash_name(name);
+        uint64_t slot = hv & mask;
+        while (load<uint64_t>(table + slot * 8) != empty_slot)
+          slot = (slot + 1) & mask;
+        store<uint64_t>(
+            table + slot * 8,
+            ((hv >> 32) << 32) | static_cast<uint64_t>(static_cast<uint32_t>(i)));
       }
 
       // ----------------------------------------------------------- payload

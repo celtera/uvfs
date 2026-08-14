@@ -4,3 +4,6 @@
 [submodule "3rdparty/readerwriterqueue"]
 	path = 3rdparty/readerwriterqueue
 	url = git@github.com:cameron314/readerwriterqueue
+[submodule "3rdparty/xxHash"]
+	path = 3rdparty/xxHash
+	url = https://github.com/Cyan4973/xxHash

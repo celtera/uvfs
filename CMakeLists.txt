@@ -44,6 +44,7 @@ endif()
 # ------------------------------------------------------------------ 3rdparty
 set(UVFS_UNORDERED_DENSE_INC
     ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/unordered_dense/include)
+set(UVFS_XXHASH_INC ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/xxHash)
 
 # ------------------------------------------------------------------- library
 add_library(uvfs_reader STATIC
@@ -56,7 +57,7 @@ add_library(uvfs::reader ALIAS uvfs_reader)
 target_compile_features(uvfs_reader PUBLIC cxx_std_20)
 target_compile_definitions(uvfs_reader PRIVATE UVFS_BUILD_LIBRARY=1)
 target_link_libraries(uvfs_reader PRIVATE $<BUILD_INTERFACE:uvfs_build_settings>)
-target_include_directories(uvfs_reader SYSTEM PRIVATE ${UVFS_UNORDERED_DENSE_INC})
+target_include_directories(uvfs_reader SYSTEM PRIVATE ${UVFS_XXHASH_INC})
 target_include_directories(uvfs_reader PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
@@ -71,6 +72,7 @@ add_library(uvfs::writer ALIAS uvfs_writer)
 target_compile_features(uvfs_writer PUBLIC cxx_std_20)
 target_compile_definitions(uvfs_writer PRIVATE UVFS_BUILD_LIBRARY=1)
 target_link_libraries(uvfs_writer PRIVATE $<BUILD_INTERFACE:uvfs_build_settings>)
+target_include_directories(uvfs_writer SYSTEM PRIVATE ${UVFS_XXHASH_INC})
 target_include_directories(uvfs_writer PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
@@ -93,10 +95,17 @@ if(UVFS_BUILD_TESTS)
     tests/test_format.cpp
     tests/test_writer.cpp
     tests/test_paths.cpp
+    tests/test_index.cpp
   )
   target_link_libraries(uvfs_tests
     PRIVATE uvfs_reader uvfs_writer $<BUILD_INTERFACE:uvfs_build_settings>)
-  target_include_directories(uvfs_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+  # Tests reach into the private format header so that assertions about the
+  # on-disk layout are written in terms of the real constants rather than
+  # magic numbers that silently rot when the layout changes.
+  target_include_directories(uvfs_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_include_directories(uvfs_tests SYSTEM PRIVATE ${UVFS_XXHASH_INC})
   add_test(NAME uvfs_tests COMMAND uvfs_tests)
 endif()
 

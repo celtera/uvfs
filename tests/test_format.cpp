@@ -1,49 +1,15 @@
+#include "archive_bytes.hpp"
 #include "framework.hpp"
 
 #include <uvfs/reader.hpp>
 #include <uvfs/writer.hpp>
 
 #include <cstdint>
-#include <fstream>
 #include <random>
 #include <vector>
 
 using namespace uvfs::test;
 
-namespace
-{
-auto slurp(const std::string& p) -> std::vector<char>
-{
-  std::ifstream f(p, std::ios::binary);
-  return {std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
-}
-
-void spit(const std::string& p, const std::vector<char>& b)
-{
-  std::ofstream f(p, std::ios::binary | std::ios::trunc);
-  f.write(b.data(), static_cast<std::streamsize>(b.size()));
-}
-
-// Builds a small but structurally complete archive: several entries, varied
-// path lengths, varied payload sizes.
-auto build_sample(const scratch_dir& dir) -> std::string
-{
-  uvfs::writer w;
-  const char* names[] = {"/a", "/bb/cc", "/dddddddddddddddd", "/e.bin", "/f/g/h"};
-  int i = 0;
-  for (auto* n : names)
-  {
-    const auto src
-        = dir.make_file("src" + std::to_string(i), 40u + static_cast<unsigned>(i) * 17u,
-                        static_cast<uint64_t>(i + 1));
-    w.add_file(n, src);
-    i++;
-  }
-  const auto arc = dir / "sample.uvfs";
-  w.commit(arc);
-  return arc;
-}
-} // namespace
 
 // -------------------------------------------------------------------- R1
 UVFS_TEST("format/last_payload_ending_exactly_at_eof")
@@ -138,15 +104,24 @@ UVFS_TEST("format/rejects_corrupt_path_length")
   const auto arc = build_sample(dir);
   auto bytes = slurp(arc);
 
-  // path_len of the first index entry lives at index_start + 16.
-  const std::size_t off = 64 + 16;
-  for (int32_t evil : {int32_t{0x7fffffff}, int32_t{-1}, int32_t{0}, int32_t{1 << 20}})
+  const auto e0 = entry_offset(bytes, 0);
+  // A name that claims to run past the end of the name blob, or to start
+  // past it, must never produce a view outside the mapping.
+  for (uint16_t evil_size : {uint16_t{0}, uint16_t{0xffff}, uint16_t{4096}})
   {
     auto patched = bytes;
-    std::memcpy(patched.data() + off, &evil, sizeof evil);
+    std::memcpy(patched.data() + e0 + ent::name_size, &evil_size, sizeof evil_size);
     const auto bad = dir / "bad.uvfs";
     spit(bad, patched);
-    CHECK_THROWS(uvfs::reader{bad});
+    CHECK(load_and_read_all(bad).rejected());
+  }
+  for (uint32_t evil_off : {uint32_t{0xffffffff}, uint32_t{1u << 20}})
+  {
+    auto patched = bytes;
+    std::memcpy(patched.data() + e0 + ent::name_offset, &evil_off, sizeof evil_off);
+    const auto bad = dir / "bad.uvfs";
+    spit(bad, patched);
+    CHECK(load_and_read_all(bad).rejected());
   }
 }
 
@@ -156,21 +131,30 @@ UVFS_TEST("format/rejects_corrupt_entry_offsets")
   const auto arc = build_sample(dir);
   auto bytes = slurp(arc);
 
-  struct { std::size_t off; int64_t value; } cases[] = {
-      {64 + 0, int64_t{-1}},                       // data_start negative
-      {64 + 0, int64_t{1} << 40},                  // data_start past the data region
-      {64 + 8, int64_t{-1}},                       // data_size negative
-      {64 + 8, int64_t{1} << 40},                  // data_size past the data region
-      {64 + 0, std::numeric_limits<int64_t>::max()},
-      {64 + 8, std::numeric_limits<int64_t>::max()},
-  };
-  for (auto& c : cases)
+  const auto e0 = entry_offset(bytes, 0);
+  const std::size_t fields[]
+      = {ent::data_offset, ent::stored_size, ent::orig_size};
+  const int64_t values[] = {
+      -1, int64_t{1} << 40, std::numeric_limits<int64_t>::max(),
+      std::numeric_limits<int64_t>::min()};
+  for (auto f : fields)
+    for (auto v : values)
+    {
+      auto patched = bytes;
+      std::memcpy(patched.data() + e0 + f, &v, sizeof v);
+      const auto bad = dir / "bad.uvfs";
+      spit(bad, patched);
+      CHECK(load_and_read_all(bad).rejected());
+    }
+
+  // An unknown codec must be refused rather than guessed at.
   {
     auto patched = bytes;
-    std::memcpy(patched.data() + c.off, &c.value, sizeof c.value);
+    const uint8_t evil = 99;
+    std::memcpy(patched.data() + e0 + ent::method, &evil, sizeof evil);
     const auto bad = dir / "bad.uvfs";
     spit(bad, patched);
-    CHECK_THROWS(uvfs::reader{bad});
+    CHECK(load_and_read_all(bad).rejected());
   }
 }
 
@@ -180,23 +164,48 @@ UVFS_TEST("format/rejects_corrupt_header_fields")
   const auto arc = build_sample(dir);
   auto bytes = slurp(arc);
 
-  // offsets of the int64 fields inside the header
-  const std::size_t fields[]
-      = {8 /*file_size*/, 16 /*file_count*/, 24 /*index_start*/,
-         32 /*index_size*/, 40 /*data_start*/, 48 /*data_size*/};
-  const int64_t values[] = {-1, std::numeric_limits<int64_t>::max(),
-                            std::numeric_limits<int64_t>::min(), 1LL << 50, 7};
+  const std::size_t fields[] = {
+      hdr::file_size,  hdr::file_count, hdr::index_start,    hdr::index_size,
+      hdr::data_start, hdr::data_size,  hdr::table_capacity, hdr::names_size};
+
+  // Values that break a header invariant outright: the header check alone has
+  // to refuse these, before a single entry is touched.
+  const int64_t impossible[] = {-1, std::numeric_limits<int64_t>::max(),
+                                std::numeric_limits<int64_t>::min(), 1LL << 50};
   for (auto off : fields)
-    for (auto v : values)
+    for (auto v : impossible)
     {
       auto patched = bytes;
       std::memcpy(patched.data() + off, &v, sizeof v);
       const auto bad = dir / "bad.uvfs";
       spit(bad, patched);
-      // Must reject or accept cleanly, never crash. Every one of these is a
-      // structural inconsistency, so rejection is the expected outcome.
       CHECK_THROWS(uvfs::reader{bad});
     }
+
+  // A size field shrunk to a small but in-bounds value is *not* something the
+  // header check can catch: the regions still fit in the file, there is just
+  // slack. It shows up when an entry is used, and the index hash catches it at
+  // open. Either way the archive must never be read as if it were intact.
+  for (auto off : fields)
+  {
+    auto patched = bytes;
+    const int64_t v = 7;
+    std::memcpy(patched.data() + off, &v, sizeof v);
+    const auto bad = dir / "bad.uvfs";
+    spit(bad, patched);
+    CHECK(load_and_read_all(bad).rejected());
+  }
+
+  // Flags this build does not understand mean the archive was written by a
+  // newer implementation, so it cannot be read safely.
+  {
+    auto patched = bytes;
+    const uint32_t unknown = 0x8000'0000u;
+    std::memcpy(patched.data() + hdr::flags, &unknown, sizeof unknown);
+    const auto bad = dir / "bad.uvfs";
+    spit(bad, patched);
+    CHECK_THROWS(uvfs::reader{bad});
+  }
 }
 
 UVFS_TEST("format/rejects_bad_magic_and_version")
@@ -214,7 +223,7 @@ UVFS_TEST("format/rejects_bad_magic_and_version")
   }
   {
     auto patched = bytes;
-    patched[7] = 99; // version byte
+    patched[hdr::version] = 99;
     const auto bad = dir / "bad-version.uvfs";
     spit(bad, patched);
     bool threw = false;
@@ -240,8 +249,9 @@ UVFS_TEST("format/rejects_truncated_files")
   const auto arc = build_sample(dir);
   const auto bytes = slurp(arc);
 
-  for (std::size_t keep : {std::size_t{0}, std::size_t{1}, std::size_t{63},
-                           std::size_t{64}, bytes.size() / 2, bytes.size() - 1})
+  for (std::size_t keep :
+       {std::size_t{0}, std::size_t{1}, std::size_t{63}, std::size_t{64},
+        std::size_t{127}, std::size_t{128}, bytes.size() / 2, bytes.size() - 1})
   {
     std::vector<char> cut(bytes.begin(), bytes.begin() + static_cast<long>(keep));
     const auto bad = dir / "cut.uvfs";
@@ -252,9 +262,11 @@ UVFS_TEST("format/rejects_truncated_files")
 
 UVFS_TEST("format/single_byte_corruption_never_crashes")
 {
-  // The reader must either reject an archive or read it without leaving the
-  // mapping. Under ASAN this is the test that proves it; without ASAN it still
-  // catches wild pointers that segfault.
+  // The reader must either refuse an archive or read it without ever leaving
+  // the mapping. Under ASAN this is the test that proves it; without ASAN it
+  // still catches wild pointers that segfault. Note that v2 does not walk the
+  // index at open, so a corrupt entry legitimately surfaces on use rather
+  // than on open -- both count as handled.
   scratch_dir dir{"mutate"};
   const auto arc = build_sample(dir);
   const auto bytes = slurp(arc);
@@ -266,34 +278,19 @@ UVFS_TEST("format/single_byte_corruption_never_crashes")
   {
     auto patched = bytes;
     // Bias toward the header and index, where the structure lives.
-    const std::size_t limit
-        = (iter % 4 == 0) ? patched.size() : std::min<std::size_t>(patched.size(), 256);
+    const std::size_t limit = (iter % 4 == 0)
+                                  ? patched.size()
+                                  : std::min<std::size_t>(patched.size(), 512);
     for (int m = 0, n = 1 + static_cast<int>(rng() % 4); m < n; m++)
       patched[rng() % limit] = static_cast<char>(rng() & 0xff);
     spit(bad, patched);
 
-    try
-    {
-      uvfs::reader r{bad};
-      // Touching every payload is what would fault on a bad pointer.
-      std::size_t total = 0;
-      r.for_each_file(
-          [&](uvfs::reader::iter_entry e)
-          {
-            total += e.path.size();
-            if (!e.data.empty())
-              total += static_cast<unsigned char>(e.data[0])
-                       + static_cast<unsigned char>(e.data[e.data.size() - 1]);
-            return true;
-          });
-      CHECK(total < (std::size_t{1} << 40));
-      accepted++;
-    }
-    catch (const std::exception&)
-    {
+    const auto r = load_and_read_all(bad);
+    if (r.rejected())
       rejected++;
-    }
+    else
+      accepted++;
   }
-  std::printf("    (%d accepted, %d rejected, 0 crashes)\n", accepted, rejected);
-  CHECK(accepted + rejected == 4000);
+  std::printf("    (%d read cleanly, %d refused, 0 crashes)\n", accepted, rejected);
+  CHECK_EQ(accepted + rejected, 4000);
 }

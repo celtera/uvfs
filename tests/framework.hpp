@@ -3,6 +3,7 @@
 // initialisers, and reports every failure rather than stopping at the first.
 #include <atomic>
 #include <cstdio>
+#include <unistd.h>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -131,6 +132,20 @@ struct scratch_dir
     return p.string();
   }
 };
+
+//! Resident set size in KB, for tests that assert an implementation does not
+//! allocate proportionally to the archive.
+inline auto current_rss_kb() -> long
+{
+  FILE* f = std::fopen("/proc/self/statm", "r");
+  if (!f)
+    return 0;
+  long total = 0, resident = 0;
+  if (std::fscanf(f, "%ld %ld", &total, &resident) != 2)
+    resident = 0;
+  std::fclose(f);
+  return resident * (sysconf(_SC_PAGESIZE) / 1024);
+}
 
 inline auto expected_bytes(std::size_t n, uint64_t seed = 1) -> std::string
 {
