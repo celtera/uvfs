@@ -79,7 +79,7 @@ try
   handle.resize(h.file_size);
 
   const auto data = handle.map_rw(h.file_size);
-  memcpy(data.bytes, &h, sizeof(header));
+  h.store_to(data.bytes);
 
   auto* const entry_ptr = data.bytes + round_up_64(sizeof(header));
 
@@ -130,11 +130,14 @@ try
   int64_t entry_pos = 0;
   for (auto& e : impl->entries)
   {
-    auto* e_file = reinterpret_cast<entry*>(entry_ptr + entry_pos);
-    e_file->data_start = e.target_offset;
-    e_file->data_size = e.size;
-    e_file->path_len = std::ssize(e.path_in_archive);
-    memcpy(e_file->path_bytes(), e.path_in_archive.data(), e.path_in_archive.size());
+    auto* const raw = entry_ptr + entry_pos;
+    const entry e_file{
+        .data_start = e.target_offset,
+        .data_size = e.size,
+        .path_len = static_cast<int32_t>(std::ssize(e.path_in_archive))};
+    e_file.store_to(raw);
+    memcpy(
+        entry::path_of(raw), e.path_in_archive.data(), e.path_in_archive.size());
 
     entry_pos
         = round_up_8(entry_pos + entry::static_size + std::ssize(e.path_in_archive));
