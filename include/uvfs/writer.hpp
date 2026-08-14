@@ -18,6 +18,13 @@ enum class on_unreadable
   skip  //!< leave the file out of the archive and carry on
 };
 
+// What to do when the same archive path is added more than once.
+enum class on_duplicate
+{
+  fail,   //!< abandon the archive and throw (default)
+  replace //!< keep the last one added
+};
+
 //! One input that could not be archived.
 struct UVFS_EXPORT skipped_file
 {
@@ -49,10 +56,15 @@ public:
   ~writer();
 
   //! Registers a file. The file is not read until commit().
+  //! Throws std::invalid_argument if `path_in_archive` is not a valid archive
+  //! path; see uvfs/path.hpp for the rule.
   void add_file(std::string_view path_in_archive, std::string_view path_in_system);
 
   //! Controls what happens when an input cannot be read. Default: fail.
   void set_unreadable_policy(on_unreadable policy) noexcept;
+
+  //! Controls what happens when an archive path is added twice. Default: fail.
+  void set_duplicate_policy(on_duplicate policy) noexcept;
 
   //! Builds the archive. The output appears atomically: it is written to a
   //! temporary file in the same directory and renamed into place, so an

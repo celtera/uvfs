@@ -1,8 +1,10 @@
 #include "fd_handle.hpp"
 #include "format.hpp"
 
+#include <uvfs/path.hpp>
 #include <uvfs/writer.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <cstdio>
@@ -42,6 +44,7 @@ struct writer::impl
   std::vector<pending> entries;
   std::vector<skipped_file> skipped;
   on_unreadable policy{on_unreadable::fail};
+  on_duplicate duplicates{on_duplicate::fail};
 };
 
 writer::writer()
@@ -54,6 +57,14 @@ writer::~writer() = default;
 void writer::add_file(
     std::string_view path_in_archive, std::string_view path_in_system)
 {
+  if (const auto problem = check_archive_path(path_in_archive);
+      problem != path_problem::ok)
+    throw std::invalid_argument(
+        std::string{"uvfs: rejecting archive path \""}
+            .append(path_in_archive)
+            .append("\": ")
+            .append(describe(problem)));
+
   impl->entries.push_back(pending{
       .path_in_archive = std::string{path_in_archive},
       .path_in_system = std::string{path_in_system}});
@@ -62,6 +73,11 @@ void writer::add_file(
 void writer::set_unreadable_policy(on_unreadable policy) noexcept
 {
   impl->policy = policy;
+}
+
+void writer::set_duplicate_policy(on_duplicate policy) noexcept
+{
+  impl->duplicates = policy;
 }
 
 auto writer::skipped() const noexcept -> const std::vector<skipped_file>&
@@ -73,6 +89,57 @@ void writer::commit(std::string_view path)
 {
   const std::string out{path};
   impl->skipped.clear();
+
+  // ------------------------------------------------------------ duplicates
+  // The same archive path twice used to produce an archive whose header
+  // claimed N files while the reader exposed N-1, with one payload written but
+  // permanently unreachable.
+  {
+    const std::size_t n = impl->entries.size();
+    std::vector<std::size_t> order(n);
+    for (std::size_t i = 0; i < n; i++)
+      order[i] = i;
+    // A stable sort keeps equal paths in registration order, so within a run
+    // of duplicates the last element is the most recent registration.
+    std::stable_sort(
+        order.begin(), order.end(),
+        [&](std::size_t a, std::size_t b) {
+          return impl->entries[a].path_in_archive < impl->entries[b].path_in_archive;
+        });
+
+    std::vector<bool> superseded(n, false);
+    std::size_t duplicate_count = 0;
+    const std::string* first_duplicate = nullptr;
+    for (std::size_t i = 1; i < n; i++)
+    {
+      const auto& prev = impl->entries[order[i - 1]].path_in_archive;
+      const auto& cur = impl->entries[order[i]].path_in_archive;
+      if (prev != cur)
+        continue;
+      superseded[order[i - 1]] = true;
+      duplicate_count++;
+      if (!first_duplicate)
+        first_duplicate = &cur;
+    }
+
+    if (duplicate_count > 0)
+    {
+      if (impl->duplicates == on_duplicate::fail)
+        throw std::invalid_argument(
+            "uvfs: " + std::to_string(duplicate_count)
+            + " duplicate archive path(s), archive not written; first: "
+            + *first_duplicate);
+
+      // on_duplicate::replace -- keep the last registration of each path,
+      // in the original registration order.
+      std::vector<pending> deduped;
+      deduped.reserve(n - duplicate_count);
+      for (std::size_t i = 0; i < n; i++)
+        if (!superseded[i])
+          deduped.push_back(std::move(impl->entries[i]));
+      impl->entries = std::move(deduped);
+    }
+  }
 
   // ---------------------------------------------------------------- sizing
   // Everything is sized before anything is laid out, so that files which

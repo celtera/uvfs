@@ -70,9 +70,15 @@ try : impl{std::make_unique<struct impl>(path)}
     if (e.data_start > h.data_size || e.data_size > h.data_size - e.data_start)
       throw std::runtime_error("uvfs: entry payload extends past the data region: ");
 
-    impl->entries[std::string_view(
-        entry::path_of(raw), static_cast<size_t>(path_len))]
-        = loaded_file_entry{.len = e.data_size, .data = payloads + e.data_start};
+    const std::string_view name(
+        entry::path_of(raw), static_cast<size_t>(path_len));
+    const auto [it, inserted] = impl->entries.try_emplace(
+        name, loaded_file_entry{.len = e.data_size, .data = payloads + e.data_start});
+    if (!inserted)
+      throw std::runtime_error(
+          "uvfs: archive lists \"" + std::string{name}
+          + "\" more than once, so file_count disagrees with what is "
+            "reachable: ");
 
     entry_idx = round_up_8(entry_idx + entry::static_size + path_len);
   }

@@ -92,6 +92,7 @@ if(UVFS_BUILD_TESTS)
     tests/test_roundtrip.cpp
     tests/test_format.cpp
     tests/test_writer.cpp
+    tests/test_paths.cpp
   )
   target_link_libraries(uvfs_tests
     PRIVATE uvfs_reader uvfs_writer $<BUILD_INTERFACE:uvfs_build_settings>)
