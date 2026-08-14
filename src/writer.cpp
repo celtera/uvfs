@@ -50,22 +50,36 @@ void unlink_quietly(const std::string& p) noexcept
   ::unlink(p.c_str());
 }
 
-[[nodiscard]] auto worker_count(int64_t items) -> int
+//! Copying files is bound by per-file syscalls and page-cache contention, not
+//! by CPU, and measurably stops improving past about a dozen threads: on a
+//! 48-thread machine, 200k small files take 0.37s with 12 threads and 0.45s
+//! with 48. Compression is the opposite -- it is CPU-bound and scales all the
+//! way out (1.31s to 0.21s from 1 to 48 threads on the same corpus) -- so the
+//! two phases get different defaults.
+constexpr int copy_thread_cap = 12;
+
+[[nodiscard]] auto worker_count(int64_t items, int requested, int cap = 0) -> int
 {
-  unsigned hw = std::thread::hardware_concurrency();
-  if (hw == 0)
-    hw = 4;
+  int hw = requested;
+  if (hw <= 0)
+  {
+    hw = static_cast<int>(std::thread::hardware_concurrency());
+    if (hw <= 0)
+      hw = 4;
+    if (cap > 0)
+      hw = std::min(hw, cap);
+  }
   return static_cast<int>(
       std::min<int64_t>(static_cast<int64_t>(hw), std::max<int64_t>(items, 1)));
 }
 
 //! Runs `body(i)` for i in [0, n) across a pool sized to the work.
 template <typename F>
-void parallel_for(int64_t n, F&& body)
+void parallel_for(int64_t n, int requested_threads, F&& body, int cap = 0)
 {
   if (n <= 0)
     return;
-  const int threads = worker_count(n);
+  const int threads = worker_count(n, requested_threads, cap);
   std::atomic<int64_t> next{0};
   std::vector<std::jthread> pool;
   pool.reserve(static_cast<std::size_t>(threads));
@@ -123,6 +137,79 @@ void parallel_for(int64_t n, F&& body)
   {
     error = e.what();
     return false;
+  }
+}
+
+//! Above this size a payload is copied by the kernel with copy_file_range
+//! instead of being pulled through user space. Below it the extra syscall
+//! costs more than the copy saves.
+constexpr int64_t kernel_copy_threshold = 256 * 1024;
+
+//! Copies `size` bytes of `src` into the destination file at `dst_offset`,
+//! which is also mapped at `dst`.
+//!
+//! Small files go through pread. mmap-per-file used to be used here, and it
+//! cost two syscalls plus a TLB shootdown broadcast to every core -- with
+//! dozens of writer threads that was the single most expensive thing the
+//! writer did. Large files are handed to copy_file_range so the bytes never
+//! enter user space at all; it can also reflink instead of copying on
+//! filesystems that support it.
+void copy_payload(
+    const fd_handle& src, int dst_fd, int64_t dst_offset, char* dst, int64_t size)
+{
+#if defined(__linux__)
+  if (size >= kernel_copy_threshold)
+  {
+    int64_t done = 0;
+    bool usable = true;
+    while (done < size && usable)
+    {
+      off_t in_off = done;
+      off_t out_off = dst_offset + done;
+      const auto moved = ::copy_file_range(
+          src.get(), &in_off, dst_fd, &out_off,
+          static_cast<size_t>(size - done), 0);
+      if (moved > 0)
+        done += moved;
+      else
+        usable = false; // not supported here (EXDEV, EINVAL, ...); fall back
+    }
+    if (done == size)
+      return;
+    // Partially copied by the kernel: finish the rest through pread.
+    dst += done;
+    dst_offset += done;
+    size -= done;
+    if (size == 0)
+      return;
+    int64_t rest = 0;
+    while (rest < size)
+    {
+      const auto got = ::pread(
+          src.get(), dst + rest, static_cast<size_t>(size - rest), done + rest);
+      if (got < 0)
+        throw std::runtime_error("read failed: " + errno_string(errno));
+      if (got == 0)
+        throw std::runtime_error("file ended early");
+      rest += got;
+    }
+    return;
+  }
+#else
+  (void)dst_fd;
+  (void)dst_offset;
+#endif
+
+  int64_t done = 0;
+  while (done < size)
+  {
+    const auto got
+        = ::pread(src.get(), dst + done, static_cast<size_t>(size - done), done);
+    if (got < 0)
+      throw std::runtime_error("read failed: " + errno_string(errno));
+    if (got == 0)
+      throw std::runtime_error("file ended early");
+    done += got;
   }
 }
 
@@ -302,12 +389,13 @@ namespace
 //! though the compression itself runs in parallel.
 template <typename OnError>
 auto place_compressed(
-    std::vector<placed>& plan, char* payloads, const std::vector<char>& dictionary,
-    const compression_settings& cs, bool want_hashes, OnError&& on_error) -> int64_t
+    std::vector<placed>& plan, char* payloads, int dst_fd, int64_t data_base,
+    const std::vector<char>& dictionary, const compression_settings& cs,
+    bool want_hashes, int threads, OnError&& on_error) -> int64_t
 {
 #if !defined(UVFS_HAS_ZSTD)
-  (void)plan; (void)payloads; (void)dictionary; (void)cs; (void)want_hashes;
-  (void)on_error;
+  (void)plan; (void)payloads; (void)dst_fd; (void)data_base; (void)dictionary;
+  (void)cs; (void)want_hashes; (void)threads; (void)on_error;
   throw no_zstd_error("compression");
 #else
   const int64_t n = std::ssize(plan);
@@ -367,19 +455,7 @@ auto place_compressed(
       try
       {
         auto fd = fd_handle::open_ro(p.src->path_in_system.c_str());
-        int64_t done = 0;
-        while (done < p.size)
-        {
-          const auto got = ::pread(
-              fd.get(), payloads + at + done,
-              static_cast<std::size_t>(std::min<int64_t>(stream_chunk, p.size - done)),
-              done);
-          if (got <= 0)
-            throw std::runtime_error(
-                got < 0 ? "read failed: " + errno_string(errno)
-                        : std::string{"file ended early"});
-          done += got;
-        }
+        copy_payload(fd, dst_fd, data_base + at, payloads + at, p.size);
         p.data_offset = at;
         p.stored_size = p.size;
         p.method = codec::store;
@@ -408,7 +484,7 @@ auto place_compressed(
     staging.assign(static_cast<std::size_t>(count), {});
 
     parallel_for(
-        count,
+        count, threads,
         [&](int64_t k)
         {
           auto& p = plan[static_cast<std::size_t>(i + k)];
@@ -477,7 +553,7 @@ auto place_compressed(
     }
 
     parallel_for(
-        count,
+        count, threads,
         [&](int64_t k)
         {
           auto& p = plan[static_cast<std::size_t>(i + k)];
@@ -504,6 +580,7 @@ struct writer::impl
   on_unreadable policy{on_unreadable::fail};
   on_duplicate duplicates{on_duplicate::fail};
   bool content_hashes{true};
+  int threads{0};
   compression_settings compress{};
 };
 
@@ -543,6 +620,11 @@ void writer::set_duplicate_policy(on_duplicate policy) noexcept
 void writer::set_content_hashes(bool enabled) noexcept
 {
   impl->content_hashes = enabled;
+}
+
+void writer::set_thread_count(int threads) noexcept
+{
+  impl->threads = threads;
 }
 
 void writer::set_compression(compression_settings settings)
@@ -635,7 +717,10 @@ void writer::commit(std::string_view path)
           {e.path_in_archive, e.path_in_system, "not a regular file"});
       continue;
     }
-    if (::access(e.path_in_system.c_str(), R_OK) != 0)
+    // Only worth a syscall per file when the caller wants unreadable inputs
+    // silently skipped; otherwise the copy will fail and report it anyway.
+    if (impl->policy == on_unreadable::skip
+        && ::access(e.path_in_system.c_str(), R_OK) != 0)
     {
       impl->skipped.push_back(
           {e.path_in_archive, e.path_in_system,
@@ -753,6 +838,9 @@ void writer::commit(std::string_view path)
         copy_errors.push_back({p.src->path_in_archive, p.src->path_in_system, why});
       };
 
+      const int dst_fd = handle.get();
+      const bool want_hashes = impl->content_hashes;
+      const int threads = impl->threads;
       if (!compressing)
       {
         // Sizes are already final, so offsets can be assigned up front and
@@ -769,14 +857,15 @@ void writer::commit(std::string_view path)
         data_used = offset;
 
         parallel_for(
-            n,
+            n, threads,
             [&](int64_t i)
             {
               auto& p = plan[static_cast<std::size_t>(i)];
               char* const dst = payloads + p.data_offset;
               if (p.size == 0)
               {
-                p.content_hash = hash_bytes("", 0);
+                if (want_hashes)
+                  p.content_hash = hash_bytes("", 0);
                 return;
               }
               // An exception escaping a thread's entry point calls
@@ -791,21 +880,24 @@ void writer::commit(std::string_view path)
                       "file changed size while the archive was being written ("
                       + std::to_string(p.size) + " -> " + std::to_string(actual)
                       + ")");
-                auto srcfile = fd.map_ro(actual);
-                memcpy(dst, srcfile.bytes, static_cast<std::size_t>(actual));
-                p.content_hash = hash_bytes(dst, static_cast<std::size_t>(actual));
+                copy_payload(
+                    fd, dst_fd, h.data_start + p.data_offset, dst, p.size);
+                if (want_hashes)
+                  p.content_hash
+                      = hash_bytes(dst, static_cast<std::size_t>(p.size));
               }
               catch (const std::exception& ex)
               {
                 record_error(p, ex.what());
               }
-            });
+            },
+            copy_thread_cap);
       }
       else
       {
         data_used = place_compressed(
-            plan, payloads, dictionary, impl->compress, impl->content_hashes,
-            record_error);
+            plan, payloads, handle.get(), h.data_start, dictionary,
+            impl->compress, impl->content_hashes, impl->threads, record_error);
       }
 
       if (copy_errors.empty())

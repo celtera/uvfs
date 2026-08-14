@@ -67,6 +67,11 @@ public:
   //! Controls what happens when an archive path is added twice. Default: fail.
   void set_duplicate_policy(on_duplicate policy) noexcept;
 
+  //! Number of threads used to build the archive. 0 (the default) means one
+  //! per hardware thread. Copying many small files is dominated by per-file
+  //! syscalls rather than by CPU, so more threads is not always faster.
+  void set_thread_count(int threads) noexcept;
+
   //! Chooses whether and how payloads are compressed. Default: no compression.
   //! Throws std::runtime_error if compression is asked for and this build has
   //! no zstd support.
