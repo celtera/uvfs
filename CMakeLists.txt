@@ -41,6 +41,38 @@ if(UVFS_LTO)
   set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
 endif()
 
+# ---------------------------------------------------------------------- zstd
+# Compression is optional at build time: the format encodes a codec per entry,
+# so a build without zstd still reads and writes archives, and simply refuses
+# entries it cannot decompress.
+option(UVFS_WITH_ZSTD "Enable zstd compression support" ON)
+set(UVFS_ZSTD_FOUND OFF)
+if(UVFS_WITH_ZSTD)
+  find_package(PkgConfig QUIET)
+  if(PkgConfig_FOUND)
+    pkg_check_modules(ZSTD QUIET IMPORTED_TARGET libzstd)
+  endif()
+  if(TARGET PkgConfig::ZSTD)
+    set(UVFS_ZSTD_FOUND ON)
+    add_library(uvfs_zstd INTERFACE)
+    target_link_libraries(uvfs_zstd INTERFACE PkgConfig::ZSTD)
+  else()
+    find_path(ZSTD_INCLUDE_DIR zstd.h)
+    find_library(ZSTD_LIBRARY NAMES zstd libzstd)
+    if(ZSTD_INCLUDE_DIR AND ZSTD_LIBRARY)
+      set(UVFS_ZSTD_FOUND ON)
+      add_library(uvfs_zstd INTERFACE)
+      target_include_directories(uvfs_zstd SYSTEM INTERFACE ${ZSTD_INCLUDE_DIR})
+      target_link_libraries(uvfs_zstd INTERFACE ${ZSTD_LIBRARY})
+    endif()
+  endif()
+  if(NOT UVFS_ZSTD_FOUND)
+    message(WARNING
+      "uvfs: zstd not found; building without compression support. "
+      "Archives using it will not be readable by this build.")
+  endif()
+endif()
+
 # ------------------------------------------------------------------ 3rdparty
 set(UVFS_UNORDERED_DENSE_INC
     ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/unordered_dense/include)
@@ -58,6 +90,10 @@ target_compile_features(uvfs_reader PUBLIC cxx_std_20)
 target_compile_definitions(uvfs_reader PRIVATE UVFS_BUILD_LIBRARY=1)
 target_link_libraries(uvfs_reader PRIVATE $<BUILD_INTERFACE:uvfs_build_settings>)
 target_include_directories(uvfs_reader SYSTEM PRIVATE ${UVFS_XXHASH_INC})
+if(UVFS_ZSTD_FOUND)
+  target_link_libraries(uvfs_reader PRIVATE $<BUILD_INTERFACE:uvfs_zstd>)
+  target_compile_definitions(uvfs_reader PRIVATE UVFS_HAS_ZSTD=1)
+endif()
 target_include_directories(uvfs_reader PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
@@ -73,6 +109,10 @@ target_compile_features(uvfs_writer PUBLIC cxx_std_20)
 target_compile_definitions(uvfs_writer PRIVATE UVFS_BUILD_LIBRARY=1)
 target_link_libraries(uvfs_writer PRIVATE $<BUILD_INTERFACE:uvfs_build_settings>)
 target_include_directories(uvfs_writer SYSTEM PRIVATE ${UVFS_XXHASH_INC})
+if(UVFS_ZSTD_FOUND)
+  target_link_libraries(uvfs_writer PRIVATE $<BUILD_INTERFACE:uvfs_zstd>)
+  target_compile_definitions(uvfs_writer PRIVATE UVFS_HAS_ZSTD=1)
+endif()
 target_include_directories(uvfs_writer PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
@@ -97,9 +137,13 @@ if(UVFS_BUILD_TESTS)
     tests/test_paths.cpp
     tests/test_index.cpp
     tests/test_integrity.cpp
+    tests/test_compression.cpp
   )
   target_link_libraries(uvfs_tests
     PRIVATE uvfs_reader uvfs_writer $<BUILD_INTERFACE:uvfs_build_settings>)
+  if(UVFS_ZSTD_FOUND)
+    target_compile_definitions(uvfs_tests PRIVATE UVFS_HAS_ZSTD=1)
+  endif()
   # Tests reach into the private format header so that assertions about the
   # on-disk layout are written in terms of the real constants rather than
   # magic numbers that silently rot when the layout changes.
@@ -119,6 +163,10 @@ if(UVFS_BUILD_BENCHMARKS)
 endif()
 
 # ------------------------------------------------------------------- install
+if(UVFS_ZSTD_FOUND)
+  install(TARGETS uvfs_zstd EXPORT uvfsTargets)
+endif()
+
 install(TARGETS uvfs_reader uvfs_writer uvfs_build_settings
   EXPORT uvfsTargets
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}

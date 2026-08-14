@@ -1,6 +1,7 @@
 #include "fd_handle.hpp"
 #include "format.hpp"
 #include "hash.hpp"
+#include "zstd_codec.hpp"
 
 #include <uvfs/path.hpp>
 #include <uvfs/writer.hpp>
@@ -13,6 +14,10 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#if defined(UVFS_HAS_ZSTD)
+#include <zdict.h>
+#endif
 
 namespace uvfs
 {
@@ -28,16 +33,467 @@ struct pending
 struct placed
 {
   const pending* src{};
-  int64_t size{};
-  int64_t target_offset{};
+  int64_t size{};          //!< the file's size on disk
   int64_t name_offset{};
+
+  // Filled in once the payload has actually been placed. With compression the
+  // stored size is not known until the bytes have been through the codec, so
+  // the index cannot be written until every payload has found its home.
+  int64_t data_offset{};
+  int64_t stored_size{};
+  codec method{codec::store};
+  uint64_t content_hash{};
 };
 
-//! Removes a file, ignoring failure. Used on the error path, where the
-//! original error is the one worth reporting.
 void unlink_quietly(const std::string& p) noexcept
 {
   ::unlink(p.c_str());
+}
+
+[[nodiscard]] auto worker_count(int64_t items) -> int
+{
+  unsigned hw = std::thread::hardware_concurrency();
+  if (hw == 0)
+    hw = 4;
+  return static_cast<int>(
+      std::min<int64_t>(static_cast<int64_t>(hw), std::max<int64_t>(items, 1)));
+}
+
+//! Runs `body(i)` for i in [0, n) across a pool sized to the work.
+template <typename F>
+void parallel_for(int64_t n, F&& body)
+{
+  if (n <= 0)
+    return;
+  const int threads = worker_count(n);
+  std::atomic<int64_t> next{0};
+  std::vector<std::jthread> pool;
+  pool.reserve(static_cast<std::size_t>(threads));
+  for (int t = 0; t < threads; t++)
+    pool.emplace_back(
+        [&]
+        {
+          for (;;)
+          {
+            const int64_t i = next.fetch_add(1, std::memory_order_relaxed);
+            if (i >= n)
+              return;
+            body(i);
+          }
+        });
+}
+
+//! Reads a whole file. Returns false and fills `error` rather than throwing,
+//! because this runs on worker threads.
+[[nodiscard]] auto read_file(
+    const std::string& path, int64_t expected, std::vector<char>& out,
+    std::string& error) -> bool
+{
+  try
+  {
+    auto fd = fd_handle::open_ro(path.c_str());
+    const auto actual = fd.filesize();
+    if (actual != expected)
+    {
+      error = "file changed size while the archive was being written ("
+              + std::to_string(expected) + " -> " + std::to_string(actual) + ")";
+      return false;
+    }
+    out.resize(static_cast<std::size_t>(actual));
+    int64_t done = 0;
+    while (done < actual)
+    {
+      const auto got
+          = ::pread(fd.get(), out.data() + done, static_cast<size_t>(actual - done), done);
+      if (got < 0)
+      {
+        error = "read failed: " + errno_string(errno);
+        return false;
+      }
+      if (got == 0)
+      {
+        error = "file ended early";
+        return false;
+      }
+      done += got;
+    }
+    return true;
+  }
+  catch (const std::exception& e)
+  {
+    error = e.what();
+    return false;
+  }
+}
+
+//! How many bytes of input a single compression batch holds in memory at once.
+constexpr int64_t compression_batch_bytes = 64 * 1024 * 1024;
+//! Above this size, whether a payload is worth compressing is decided from a
+//! sample rather than by compressing the whole thing. This is what keeps a
+//! multi-gigabyte video from being compressed in full only to discover that it
+//! was already compressed.
+constexpr int64_t sample_decision_threshold = 1 << 20;
+constexpr int64_t sample_bytes = 256 * 1024;
+//! Chunk size when streaming a payload too large to hold in memory.
+constexpr int64_t stream_chunk = 4 * 1024 * 1024;
+
+[[nodiscard]] auto worth_keeping(
+    int64_t compressed, int64_t original, const compression_settings& cs) noexcept
+    -> bool
+{
+  if (compressed <= 0 || compressed >= original)
+    return false;
+  if (cs.method == compression::always)
+    return true;
+  // Saving a couple of percent is not worth giving up the zero-copy pointer
+  // and paying to decompress on every read.
+  const int64_t saved = original - compressed;
+  return saved * 100 >= original * cs.min_gain_percent;
+}
+
+#if defined(UVFS_HAS_ZSTD)
+
+using cdict_ptr = std::unique_ptr<ZSTD_CDict, size_t (*)(ZSTD_CDict*)>;
+
+//! Decides from the first `sample_bytes` whether a large payload is worth
+//! compressing at all.
+[[nodiscard]] auto sample_says_compress(
+    const std::string& path, const compression_settings& cs) -> bool
+{
+  try
+  {
+    auto fd = fd_handle::open_ro(path.c_str());
+    std::vector<char> sample(static_cast<std::size_t>(sample_bytes));
+    const auto got = ::pread(fd.get(), sample.data(), sample.size(), 0);
+    if (got <= 0)
+      return false;
+    std::vector<char> dst(static_cast<std::size_t>(zstd_bound(got)));
+    const zstd_compressor c;
+    const auto packed = c.compress(
+        dst.data(), std::ssize(dst), sample.data(), got, cs.level, nullptr);
+    return worth_keeping(packed, got, cs);
+  }
+  catch (const std::exception&)
+  {
+    return false;
+  }
+}
+
+#endif // UVFS_HAS_ZSTD
+
+#if defined(UVFS_HAS_ZSTD)
+
+//! Trains a zstd dictionary from a sample of the inputs. A shared dictionary
+//! is what makes compression work on many small files: each payload on its own
+//! is too short for zstd to build up any history, but they resemble each other.
+[[nodiscard]] auto train_dictionary_from(
+    const std::vector<placed>& plan, const compression_settings& cs)
+    -> std::vector<char>
+{
+  // Sample small files: they are the ones a dictionary helps, and feeding
+  // multi-megabyte payloads to the trainer wastes time and skews the result.
+  std::vector<const placed*> candidates;
+  for (const auto& p : plan)
+    if (p.size > 0 && p.size <= 64 * 1024)
+      candidates.push_back(&p);
+  if (candidates.size() < 8)
+    return {};
+
+  const auto stride = std::max<std::size_t>(
+      1, candidates.size() / static_cast<std::size_t>(std::max(1, cs.dictionary_samples)));
+
+  std::vector<char> blob;
+  std::vector<std::size_t> sizes;
+  std::string error;
+  std::vector<char> buffer;
+  // The trainer wants a decent multiple of the dictionary size to work from.
+  const auto budget = cs.dictionary_size * 100;
+  for (std::size_t i = 0; i < candidates.size() && std::ssize(blob) < budget;
+       i += stride)
+  {
+    const auto& p = *candidates[i];
+    if (!read_file(p.src->path_in_system, p.size, buffer, error))
+      continue;
+    blob.insert(blob.end(), buffer.begin(), buffer.end());
+    sizes.push_back(buffer.size());
+  }
+  if (sizes.size() < 8 || blob.empty())
+    return {};
+
+  std::vector<char> dict(static_cast<std::size_t>(cs.dictionary_size));
+  const auto produced = ZDICT_trainFromBuffer(
+      dict.data(), dict.size(), blob.data(), sizes.data(),
+      static_cast<unsigned>(sizes.size()));
+  if (ZDICT_isError(produced))
+    return {}; // not enough material to learn from; carry on without one
+  dict.resize(produced);
+  return dict;
+}
+
+//! Compresses a payload too large to stage in memory, straight into the
+//! mapping. Returns the stored size, or -1 if the result would not be smaller
+//! than the input, in which case the caller stores the raw bytes instead.
+[[nodiscard]] auto stream_compress_into(
+    const std::string& path, int64_t size, char* dst, int64_t dst_capacity,
+    const compression_settings& cs, const ZSTD_CDict* dict, std::string& error)
+    -> int64_t
+{
+  auto fd = fd_handle::open_ro(path.c_str());
+  std::unique_ptr<ZSTD_CCtx, size_t (*)(ZSTD_CCtx*)> ctx{
+      ZSTD_createCCtx(), &ZSTD_freeCCtx};
+  if (!ctx)
+  {
+    error = "could not create a zstd context";
+    return -1;
+  }
+  if (dict)
+    ZSTD_CCtx_refCDict(ctx.get(), dict);
+  else
+    ZSTD_CCtx_setParameter(ctx.get(), ZSTD_c_compressionLevel, cs.level);
+  ZSTD_CCtx_setPledgedSrcSize(ctx.get(), static_cast<unsigned long long>(size));
+
+  std::vector<char> in(static_cast<std::size_t>(stream_chunk));
+  ZSTD_outBuffer out{dst, static_cast<std::size_t>(dst_capacity), 0};
+
+  int64_t consumed = 0;
+  while (consumed < size)
+  {
+    const auto want = std::min<int64_t>(stream_chunk, size - consumed);
+    const auto got = ::pread(fd.get(), in.data(), static_cast<std::size_t>(want), consumed);
+    if (got <= 0)
+    {
+      error = got < 0 ? "read failed: " + errno_string(errno) : "file ended early";
+      return -1;
+    }
+    consumed += got;
+    ZSTD_inBuffer input{in.data(), static_cast<std::size_t>(got), 0};
+    const auto mode = (consumed >= size) ? ZSTD_e_end : ZSTD_e_continue;
+    while (input.pos < input.size || mode == ZSTD_e_end)
+    {
+      const auto rc = ZSTD_compressStream2(ctx.get(), &out, &input, mode);
+      if (ZSTD_isError(rc))
+      {
+        error = ZSTD_getErrorName(rc);
+        return -1;
+      }
+      if (out.pos >= static_cast<std::size_t>(dst_capacity))
+        return -1; // would not be smaller; store it verbatim instead
+      if (mode == ZSTD_e_end && rc == 0)
+        break;
+      if (mode == ZSTD_e_continue && input.pos >= input.size)
+        break;
+    }
+  }
+  return static_cast<int64_t>(out.pos);
+}
+
+#endif // UVFS_HAS_ZSTD
+
+} // namespace
+
+namespace
+{
+//! Places every payload, compressing where it pays. Returns the number of
+//! bytes of data region used.
+//!
+//! Work is done in batches so that memory stays bounded by the batch rather
+//! than by the archive, and offsets are assigned sequentially in sorted order
+//! within each batch, which keeps the output byte-for-byte reproducible even
+//! though the compression itself runs in parallel.
+template <typename OnError>
+auto place_compressed(
+    std::vector<placed>& plan, char* payloads, const std::vector<char>& dictionary,
+    const compression_settings& cs, bool want_hashes, OnError&& on_error) -> int64_t
+{
+#if !defined(UVFS_HAS_ZSTD)
+  (void)plan; (void)payloads; (void)dictionary; (void)cs; (void)want_hashes;
+  (void)on_error;
+  throw no_zstd_error("compression");
+#else
+  const int64_t n = std::ssize(plan);
+  cdict_ptr cdict{nullptr, &ZSTD_freeCDict};
+  if (!dictionary.empty())
+    cdict.reset(
+        ZSTD_createCDict(dictionary.data(), dictionary.size(), cs.level));
+  const codec dict_codec = cdict ? codec::zstd_dict : codec::zstd;
+
+  int64_t offset = 0;
+  int64_t i = 0;
+  std::vector<std::vector<char>> staging;
+
+  while (i < n)
+  {
+    // A payload too large to stage goes on its own and is streamed straight
+    // into the mapping, where its offset is already known.
+    if (plan[static_cast<std::size_t>(i)].size > compression_batch_bytes)
+    {
+      auto& p = plan[static_cast<std::size_t>(i)];
+      const bool try_it = (cs.method == compression::always)
+                          || sample_says_compress(p.src->path_in_system, cs);
+
+      int64_t written = -1;
+      if (try_it)
+      {
+        // Aligning as if compressed; if it falls back to store the offset is
+        // still 64-byte aligned because compressed alignment divides it.
+        const int64_t at = round_up(offset, payload_alignment);
+        std::string error;
+        written = stream_compress_into(
+            p.src->path_in_system, p.size, payloads + at, p.size, cs, cdict.get(),
+            error);
+        if (written >= 0 && worth_keeping(written, p.size, cs))
+        {
+          p.data_offset = at;
+          p.stored_size = written;
+          p.method = dict_codec;
+          if (want_hashes)
+            p.content_hash = hash_bytes(payloads + at, static_cast<std::size_t>(written));
+          offset = at + written;
+          i++;
+          continue;
+        }
+        if (written < 0 && !error.empty()
+            && error.find("would not") == std::string::npos)
+        {
+          // A genuine I/O or codec failure, not "compression did not help".
+          on_error(p, error);
+          i++;
+          continue;
+        }
+      }
+
+      // Store it verbatim, copied straight from the source.
+      const int64_t at = round_up(offset, payload_alignment);
+      try
+      {
+        auto fd = fd_handle::open_ro(p.src->path_in_system.c_str());
+        int64_t done = 0;
+        while (done < p.size)
+        {
+          const auto got = ::pread(
+              fd.get(), payloads + at + done,
+              static_cast<std::size_t>(std::min<int64_t>(stream_chunk, p.size - done)),
+              done);
+          if (got <= 0)
+            throw std::runtime_error(
+                got < 0 ? "read failed: " + errno_string(errno)
+                        : std::string{"file ended early"});
+          done += got;
+        }
+        p.data_offset = at;
+        p.stored_size = p.size;
+        p.method = codec::store;
+        if (want_hashes)
+          p.content_hash = hash_bytes(payloads + at, static_cast<std::size_t>(p.size));
+        offset = at + p.size;
+      }
+      catch (const std::exception& e)
+      {
+        on_error(p, e.what());
+      }
+      i++;
+      continue;
+    }
+
+    // Otherwise take as many files as fit in one batch.
+    int64_t j = i;
+    int64_t batch_bytes = 0;
+    while (j < n && (j == i || batch_bytes + plan[static_cast<std::size_t>(j)].size
+                                   <= compression_batch_bytes))
+    {
+      batch_bytes += plan[static_cast<std::size_t>(j)].size;
+      j++;
+    }
+    const int64_t count = j - i;
+    staging.assign(static_cast<std::size_t>(count), {});
+
+    parallel_for(
+        count,
+        [&](int64_t k)
+        {
+          auto& p = plan[static_cast<std::size_t>(i + k)];
+          auto& slot = staging[static_cast<std::size_t>(k)];
+          if (p.size == 0)
+          {
+            p.method = codec::store;
+            return;
+          }
+
+          std::vector<char> raw;
+          std::string error;
+          if (!read_file(p.src->path_in_system, p.size, raw, error))
+          {
+            on_error(p, error);
+            return;
+          }
+
+          const bool eligible = p.size >= cs.min_size;
+          const bool sample_first = p.size >= sample_decision_threshold
+                                    && cs.method == compression::automatic;
+          bool try_it = eligible;
+          if (try_it && sample_first)
+          {
+            const zstd_compressor probe;
+            std::vector<char> tmp(
+                static_cast<std::size_t>(zstd_bound(sample_bytes)));
+            const auto packed = probe.compress(
+                tmp.data(), std::ssize(tmp), raw.data(),
+                std::min<int64_t>(sample_bytes, p.size), cs.level, nullptr);
+            try_it = worth_keeping(
+                packed, std::min<int64_t>(sample_bytes, p.size), cs);
+          }
+
+          if (try_it)
+          {
+            thread_local zstd_compressor compressor;
+            std::vector<char> packed(
+                static_cast<std::size_t>(zstd_bound(p.size)));
+            const auto size = compressor.compress(
+                packed.data(), std::ssize(packed), raw.data(), p.size, cs.level,
+                cdict.get());
+            if (worth_keeping(size, p.size, cs))
+            {
+              packed.resize(static_cast<std::size_t>(size));
+              slot = std::move(packed);
+              p.method = dict_codec;
+              return;
+            }
+          }
+          slot = std::move(raw);
+          p.method = codec::store;
+        });
+
+    // Offsets in sorted order, so the layout does not depend on which thread
+    // finished first.
+    for (int64_t k = 0; k < count; k++)
+    {
+      auto& p = plan[static_cast<std::size_t>(i + k)];
+      const int64_t align = (p.method == codec::store) ? payload_alignment
+                                                       : compressed_alignment;
+      offset = round_up(offset, align);
+      p.data_offset = offset;
+      p.stored_size = std::ssize(staging[static_cast<std::size_t>(k)]);
+      offset += p.stored_size;
+    }
+
+    parallel_for(
+        count,
+        [&](int64_t k)
+        {
+          auto& p = plan[static_cast<std::size_t>(i + k)];
+          auto& slot = staging[static_cast<std::size_t>(k)];
+          char* const dst = payloads + p.data_offset;
+          if (!slot.empty())
+            memcpy(dst, slot.data(), slot.size());
+          if (want_hashes)
+            p.content_hash = hash_bytes(dst, static_cast<std::size_t>(p.stored_size));
+          std::vector<char>{}.swap(slot); // release the batch as we go
+        });
+
+    i = j;
+  }
+  return offset;
+#endif
 }
 } // namespace
 
@@ -48,6 +504,7 @@ struct writer::impl
   on_unreadable policy{on_unreadable::fail};
   on_duplicate duplicates{on_duplicate::fail};
   bool content_hashes{true};
+  compression_settings compress{};
 };
 
 writer::writer()
@@ -88,6 +545,15 @@ void writer::set_content_hashes(bool enabled) noexcept
   impl->content_hashes = enabled;
 }
 
+void writer::set_compression(compression_settings settings)
+{
+  if (settings.method != compression::none && !zstd_available())
+    throw no_zstd_error("compression");
+  if (settings.dictionary_size != 0 && !zstd_available())
+    throw no_zstd_error("dictionary training");
+  impl->compress = settings;
+}
+
 auto writer::skipped() const noexcept -> const std::vector<skipped_file>&
 {
   return impl->skipped;
@@ -99,9 +565,6 @@ void writer::commit(std::string_view path)
   impl->skipped.clear();
 
   // ------------------------------------------------------------ duplicates
-  // The same archive path twice used to produce an archive whose header
-  // claimed N files while the reader exposed N-1, with one payload written but
-  // permanently unreachable.
   {
     const std::size_t n = impl->entries.size();
     std::vector<std::size_t> order(n);
@@ -138,8 +601,6 @@ void writer::commit(std::string_view path)
             + " duplicate archive path(s), archive not written; first: "
             + *first_duplicate);
 
-      // on_duplicate::replace -- keep the last registration of each path,
-      // in the original registration order.
       std::vector<pending> deduped;
       deduped.reserve(n - duplicate_count);
       for (std::size_t i = 0; i < n; i++)
@@ -158,8 +619,6 @@ void writer::commit(std::string_view path)
 
   for (const auto& e : impl->entries)
   {
-    // stat() is given a NUL-terminated std::string, never a string_view's
-    // .data(), which would read past the end of the view.
     struct stat st
     {
     };
@@ -209,31 +668,50 @@ void writer::commit(std::string_view path)
       [](const placed& a, const placed& b)
       { return a.src->path_in_archive < b.src->path_in_archive; });
 
+  const int64_t n = std::ssize(plan);
+  const bool compressing = impl->compress.method != compression::none;
+
   header h{};
   memcpy(h.head, uvfs::ident, sizeof(uvfs::ident));
 
   int64_t names_size = 0;
-  int64_t data_size = 0;
+  int64_t worst_case_data = 0;
   for (auto& p : plan)
   {
     p.name_offset = names_size;
     names_size += std::ssize(p.src->path_in_archive);
-
-    // Stored payloads carry the 64-byte alignment promise.
-    p.target_offset = round_up(data_size, payload_alignment);
-    data_size = p.target_offset + p.size;
+    // A payload is never stored larger than the file: if compression does not
+    // shrink it, the raw bytes are stored instead. So the uncompressed layout
+    // is an upper bound on the compressed one.
+    worst_case_data = round_up(worst_case_data, payload_alignment) + p.size;
   }
 
-  h.file_count = std::ssize(plan);
-  h.table_capacity = table_capacity_for(h.file_count);
+  h.file_count = n;
+  h.table_capacity = table_capacity_for(n);
   h.names_size = names_size;
   if (impl->content_hashes)
     h.flag_bits |= flag_entry_hashes;
   h.index_start = round_up_64(header_size);
   h.index_size = h.names_offset() + names_size;
-  h.data_start = round_up_64(h.index_start + h.index_size);
-  h.data_size = data_size;
-  h.file_size = h.data_start + h.data_size;
+
+  // ------------------------------------------------------------ dictionary
+  std::vector<char> dictionary;
+#if defined(UVFS_HAS_ZSTD)
+  if (compressing && impl->compress.dictionary_size > 0 && n > 0)
+    dictionary = train_dictionary_from(plan, impl->compress);
+#endif
+
+  if (!dictionary.empty())
+  {
+    h.flag_bits |= flag_has_dictionary;
+    h.dict_start = round_up_8(h.index_start + h.index_size);
+    h.dict_size = std::ssize(dictionary);
+    h.data_start = round_up_64(h.dict_start + h.dict_size);
+  }
+  else
+  {
+    h.data_start = round_up_64(h.index_start + h.index_size);
+  }
 
   // ------------------------------------------------------------- temp file
   // The archive is built under a temporary name in the destination directory
@@ -246,145 +724,156 @@ void writer::commit(std::string_view path)
       = dir + "/.uvfs-tmp-" + std::to_string(::getpid()) + "-"
         + std::to_string(reinterpret_cast<uintptr_t>(&out));
 
+  // Compression makes the final size unknown until every payload is placed, so
+  // the file is mapped at its uncompressed upper bound and truncated back down
+  // once the real size is known. The unwritten tail is a hole and costs no
+  // blocks. Only the uncompressed path can reserve space up front.
+  const int64_t upper_bound = h.data_start + worst_case_data;
+
   std::vector<skipped_file> copy_errors;
+  std::mutex errors_mutex;
   try
   {
     auto handle = fd_handle::create_rw(tmp.c_str(), 0644);
-    handle.reserve_space(h.file_size);
-    handle.resize(h.file_size);
+    if (!compressing)
+      handle.reserve_space(upper_bound);
+    handle.resize(upper_bound);
 
+    int64_t data_used = 0;
     {
-      const auto data = handle.map_rw(h.file_size);
-      h.store_to(data.bytes);
+      const auto data = handle.map_rw(upper_bound);
+      char* const payloads = data.bytes + h.data_start;
 
-      // ------------------------------------------------------------- index
-      // The index is written in its final, ready-to-use form: a sorted entry
-      // array, a populated hash table and a name blob. A reader maps the file
-      // and uses them directly; none of this is recomputed at open.
-      auto* const index = data.bytes + h.index_start;
-      auto* const table = index + h.table_offset();
-      auto* const names = index + h.names_offset();
+      if (!dictionary.empty())
+        memcpy(data.bytes + h.dict_start, dictionary.data(), dictionary.size());
 
-      for (int64_t i = 0; i < h.table_capacity; i++)
-        store<uint64_t>(table + i * 8, empty_slot);
-
-      const auto mask = static_cast<uint64_t>(h.table_capacity - 1);
-      for (int64_t i = 0; i < h.file_count; i++)
+      const auto record_error = [&](const placed& p, const std::string& why)
       {
-        const auto& p = plan[static_cast<std::size_t>(i)];
-        const auto& name = p.src->path_in_archive;
-
-        const entry e{
-            .data_offset = p.target_offset,
-            .stored_size = p.size,
-            .orig_size = p.size,
-            .name_offset = static_cast<uint32_t>(p.name_offset),
-            .name_size = static_cast<uint16_t>(name.size()),
-            .method = codec::store};
-        e.store_to(index + i * entry_size);
-        memcpy(names + p.name_offset, name.data(), name.size());
-
-        // Insert into the open-addressed table. The high 32 bits of the hash
-        // ride along as a fingerprint so a lookup can reject a colliding slot
-        // without dereferencing the entry or the name.
-        const uint64_t hv = hash_name(name);
-        uint64_t slot = hv & mask;
-        while (load<uint64_t>(table + slot * 8) != empty_slot)
-          slot = (slot + 1) & mask;
-        store<uint64_t>(
-            table + slot * 8,
-            ((hv >> 32) << 32) | static_cast<uint64_t>(static_cast<uint32_t>(i)));
-      }
-
-      // ----------------------------------------------------------- payload
-      // Workers pull from a shared counter instead of being fed by a queue,
-      // so there is no producer to wait on, nothing spins, and a thread that
-      // finishes early simply takes the next item.
-      const int64_t n = std::ssize(plan);
-      // Hashing the payload while it is still in cache from the copy is far
-      // cheaper than a second pass over the finished archive.
-      std::vector<uint64_t> content(static_cast<std::size_t>(n), 0);
-      unsigned hw = std::thread::hardware_concurrency();
-      if (hw == 0)
-        hw = 4;
-      const auto threads = static_cast<int>(
-          std::min<int64_t>(static_cast<int64_t>(hw), std::max<int64_t>(n, 1)));
-
-      std::atomic<int64_t> next{0};
-      std::mutex errors_mutex;
-
-      const auto worker = [&]
-      {
-        for (;;)
-        {
-          const int64_t i = next.fetch_add(1, std::memory_order_relaxed);
-          if (i >= n)
-            return;
-          const auto& p = plan[static_cast<size_t>(i)];
-          char* const dst = data.bytes + h.data_start + p.target_offset;
-          if (p.size == 0)
-          {
-            content[static_cast<std::size_t>(i)] = hash_bytes("", 0);
-            continue;
-          }
-
-          // An exception escaping a thread's entry point calls
-          // std::terminate, which is why archiving a live directory used to
-          // abort the process. Every failure below is recorded and reported
-          // by commit() instead.
-          try
-          {
-            auto fd = fd_handle::open_ro(p.src->path_in_system.c_str());
-            const auto actual = fd.filesize();
-            if (actual != p.size)
-              throw std::runtime_error(
-                  "file changed size while the archive was being written ("
-                  + std::to_string(p.size) + " -> " + std::to_string(actual)
-                  + "): ");
-
-            auto srcfile = fd.map_ro(actual);
-            memcpy(dst, srcfile.bytes, static_cast<size_t>(actual));
-            content[static_cast<std::size_t>(i)]
-                = hash_bytes(dst, static_cast<std::size_t>(actual));
-          }
-          catch (const std::exception& ex)
-          {
-            const std::lock_guard lock{errors_mutex};
-            copy_errors.push_back(
-                {p.src->path_in_archive, p.src->path_in_system, ex.what()});
-          }
-        }
+        const std::lock_guard lock{errors_mutex};
+        copy_errors.push_back({p.src->path_in_archive, p.src->path_in_system, why});
       };
 
+      if (!compressing)
       {
-        std::vector<std::jthread> pool;
-        pool.reserve(static_cast<size_t>(threads));
-        for (int i = 0; i < threads; i++)
-          pool.emplace_back(worker);
-      } // joins
+        // Sizes are already final, so offsets can be assigned up front and
+        // every payload copied straight into its slot in one parallel pass.
+        int64_t offset = 0;
+        for (auto& p : plan)
+        {
+          offset = round_up(offset, payload_alignment);
+          p.data_offset = offset;
+          p.stored_size = p.size;
+          p.method = codec::store;
+          offset += p.size;
+        }
+        data_used = offset;
+
+        parallel_for(
+            n,
+            [&](int64_t i)
+            {
+              auto& p = plan[static_cast<std::size_t>(i)];
+              char* const dst = payloads + p.data_offset;
+              if (p.size == 0)
+              {
+                p.content_hash = hash_bytes("", 0);
+                return;
+              }
+              // An exception escaping a thread's entry point calls
+              // std::terminate, which is why archiving a live directory used
+              // to abort the process. Failures are recorded, not thrown.
+              try
+              {
+                auto fd = fd_handle::open_ro(p.src->path_in_system.c_str());
+                const auto actual = fd.filesize();
+                if (actual != p.size)
+                  throw std::runtime_error(
+                      "file changed size while the archive was being written ("
+                      + std::to_string(p.size) + " -> " + std::to_string(actual)
+                      + ")");
+                auto srcfile = fd.map_ro(actual);
+                memcpy(dst, srcfile.bytes, static_cast<std::size_t>(actual));
+                p.content_hash = hash_bytes(dst, static_cast<std::size_t>(actual));
+              }
+              catch (const std::exception& ex)
+              {
+                record_error(p, ex.what());
+              }
+            });
+      }
+      else
+      {
+        data_used = place_compressed(
+            plan, payloads, dictionary, impl->compress, impl->content_hashes,
+            record_error);
+      }
 
       if (copy_errors.empty())
       {
-        // ------------------------------------------------------- integrity
+        // --------------------------------------------------------- index
+        // Written only now, because with compression the stored size and
+        // offset of a payload are not known until it has been placed. The
+        // index is written in its final, ready-to-use form: a sorted entry
+        // array, a populated hash table and a name blob. A reader maps the
+        // file and uses them directly.
+        h.data_size = data_used;
+        h.file_size = h.data_start + data_used;
+
+        auto* const index = data.bytes + h.index_start;
+        auto* const table = index + h.table_offset();
+        auto* const names = index + h.names_offset();
+
+        for (int64_t i = 0; i < h.table_capacity; i++)
+          store<uint64_t>(table + i * 8, empty_slot);
+
+        const auto mask = static_cast<uint64_t>(h.table_capacity - 1);
+        for (int64_t i = 0; i < n; i++)
+        {
+          const auto& p = plan[static_cast<std::size_t>(i)];
+          const auto& name = p.src->path_in_archive;
+
+          const entry e{
+              .data_offset = p.data_offset,
+              .stored_size = p.stored_size,
+              .orig_size = p.size,
+              .name_offset = static_cast<uint32_t>(p.name_offset),
+              .name_size = static_cast<uint16_t>(name.size()),
+              .method = p.method};
+          e.store_to(index + i * entry_size);
+          memcpy(names + p.name_offset, name.data(), name.size());
+
+          // Insert into the open-addressed table. The high 32 bits of the
+          // hash ride along as a fingerprint so a lookup can reject a
+          // colliding slot without dereferencing the entry or the name.
+          const uint64_t hv = hash_name(name);
+          uint64_t slot = hv & mask;
+          while (load<uint64_t>(table + slot * 8) != empty_slot)
+            slot = (slot + 1) & mask;
+          store<uint64_t>(
+              table + slot * 8,
+              ((hv >> 32) << 32) | static_cast<uint64_t>(static_cast<uint32_t>(i)));
+        }
+
+        // ----------------------------------------------------- integrity
         // Order matters: the content hashes live inside the index, the index
         // hash covers the index, and the header hash covers the header --
-        // including the index hash. So they have to be written outwards.
+        // including the index hash. So they are written outwards.
         if (h.has(flag_entry_hashes))
         {
           auto* const hashes = index + h.hashes_offset();
           for (int64_t i = 0; i < n; i++)
-            store<uint64_t>(hashes + i * 8, content[static_cast<std::size_t>(i)]);
+            store<uint64_t>(
+                hashes + i * 8, plan[static_cast<std::size_t>(i)].content_hash);
         }
 
-        h.index_hash
-            = hash_bytes(index, static_cast<std::size_t>(h.index_size));
+        h.index_hash = hash_bytes(index, static_cast<std::size_t>(h.index_size));
         h.store_to(data.bytes);
         h.header_hash = hash_bytes(data.bytes, header::hashed_prefix);
         store<uint64_t>(data.bytes + header::hashed_prefix, h.header_hash);
 
         // Push our own dirty pages, rather than every dirty page on the
         // machine, which is what a bare sync() does.
-        if (msync(data.bytes, static_cast<size_t>(h.file_size), MS_SYNC) != 0)
+        if (msync(data.bytes, static_cast<std::size_t>(h.file_size), MS_SYNC) != 0)
           throw std::runtime_error(
               "uvfs: could not flush mapping (" + errno_string(errno) + "): ");
       }
@@ -402,6 +891,8 @@ void writer::commit(std::string_view path)
       throw commit_error{msg, std::move(copy_errors)};
     }
 
+    // Give back whatever compression saved.
+    handle.resize(h.file_size);
     handle.sync();
     handle.close_now();
 
@@ -422,4 +913,5 @@ void writer::commit(std::string_view path)
     throw std::runtime_error(std::string(e.what()).append(out));
   }
 }
+
 }

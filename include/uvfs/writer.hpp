@@ -1,4 +1,5 @@
 #pragma once
+#include "compression.hpp"
 #include "config.hpp"
 
 #include <memory>
@@ -65,6 +66,11 @@ public:
 
   //! Controls what happens when an archive path is added twice. Default: fail.
   void set_duplicate_policy(on_duplicate policy) noexcept;
+
+  //! Chooses whether and how payloads are compressed. Default: no compression.
+  //! Throws std::runtime_error if compression is asked for and this build has
+  //! no zstd support.
+  void set_compression(compression_settings settings);
 
   //! Store a content hash per entry so readers can detect a damaged payload.
   //! Costs 8 bytes per file and one extra pass over data that is already in

@@ -1,10 +1,12 @@
 #include "fd_handle.hpp"
 #include "format.hpp"
 #include "hash.hpp"
+#include "zstd_codec.hpp"
 
 #include <uvfs/reader.hpp>
 
 #include <cassert>
+#include <mutex>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -22,6 +24,15 @@ struct reader::impl
   fd_handle handle;
   mmap_handle<const char*> map;
   integrity check{integrity::header_only};
+
+#if defined(UVFS_HAS_ZSTD)
+  // One decompression context per reader, reused across reads. Guarded
+  // because a reader is shared across threads far more often than it is
+  // written to, and zstd contexts are not thread safe.
+  mutable std::mutex codec_mutex;
+  mutable zstd_decompressor decompressor;
+  std::unique_ptr<ZSTD_DDict, size_t (*)(ZSTD_DDict*)> ddict{nullptr, &ZSTD_freeDDict};
+#endif
 
   header h{};
   const char* index{};    //!< start of the index region
@@ -182,6 +193,20 @@ try : impl{std::make_unique<struct impl>(path)}
     throw std::runtime_error(
         "uvfs: full integrity checking was asked for but this archive has no "
         "content hashes: ");
+
+  if (h.has(flag_has_dictionary))
+  {
+#if defined(UVFS_HAS_ZSTD)
+    impl->ddict.reset(ZSTD_createDDict(
+        base + h.dict_start, static_cast<std::size_t>(h.dict_size)));
+    if (!impl->ddict)
+      throw std::runtime_error("uvfs: could not load the archive dictionary: ");
+#else
+    throw std::runtime_error(
+        "uvfs: archive uses a compression dictionary but this build has no "
+        "zstd support: ");
+#endif
+  }
 }
 catch (const std::runtime_error& e)
 {
@@ -288,9 +313,24 @@ auto reader::read_into(std::string_view path, char* out, int64_t capacity) const
       memcpy(out, impl->payloads + e.data_offset, static_cast<size_t>(e.orig_size));
     return e.orig_size;
   }
-  throw std::runtime_error(
-      "uvfs: " + std::string{path}
-      + " is compressed but this build has no decompression support");
+
+#if defined(UVFS_HAS_ZSTD)
+  const ZSTD_DDict* dict
+      = (e.method == codec::zstd_dict) ? impl->ddict.get() : nullptr;
+  if (e.method == codec::zstd_dict && !dict)
+    throw std::runtime_error(
+        "uvfs: " + std::string{path}
+        + " needs the archive dictionary, which is missing");
+  {
+    const std::lock_guard lock{impl->codec_mutex};
+    impl->decompressor.decompress(
+        out, e.orig_size, impl->payloads + e.data_offset, e.stored_size, dict,
+        path);
+  }
+  return e.orig_size;
+#else
+  throw no_zstd_error("reading " + std::string{path});
+#endif
 }
 
 auto reader::read(std::string_view path) const -> std::optional<std::vector<char>>
