@@ -112,6 +112,11 @@ video is neither compressed pointlessly nor held in memory.
 Output is byte-for-byte reproducible: compression runs in parallel, but offsets
 are assigned in sorted order.
 
+The same file added under several names, or reached through hard links, is
+stored once and pointed at by every entry that uses it. The format never
+required payload offsets to be distinct, so this costs a hash lookup at write
+time and nothing at all at read time.
+
 ## Integrity
 
 The threat model is *corruption*, not an adversary: bad disks, truncated
@@ -239,7 +244,11 @@ Compression is CPU-bound and uses every thread available.
 - POSIX only. `mmap`, `pread`, `copy_file_range`; no Windows backend yet.
 - Little-endian only, checked at compile time.
 - No metadata: no mode, mtime, ownership, symlinks or directories.
-- No dedup of identical payloads.
+- Payloads are shared between entries that name the same file (same inode) or
+  the same file added twice, but identical *content* under different inodes is
+  stored more than once. Content dedup would have saved 4.2% on `/usr/include`
+  in exchange for hashing every input before laying the archive out, which
+  doubles read I/O; that trade is not worth making by default.
 - Per-entry overhead is ~50 bytes plus alignment padding, which is significant
   for files of only a few hundred bytes (see above).
 - Archives are written whole; there is no append or update in place.

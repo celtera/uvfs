@@ -11,6 +11,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <mutex>
+#include <unordered_map>
 #include <string>
 #include <thread>
 #include <vector>
@@ -35,6 +36,9 @@ struct placed
   const pending* src{};
   int64_t size{};          //!< the file's size on disk
   int64_t name_offset{};
+  uint64_t device{};       //!< st_dev / st_ino identify the file itself, so
+  uint64_t inode{};        //!< two names for one file can share a payload
+  int64_t shares_with{-1}; //!< index of the entry holding the bytes, or -1
 
   // Filled in once the payload has actually been placed. With compression the
   // stored size is not known until the bytes have been through the codec, so
@@ -415,6 +419,12 @@ auto place_compressed(
   {
     // A payload too large to stage goes on its own and is streamed straight
     // into the mapping, where its offset is already known.
+    if (plan[static_cast<std::size_t>(i)].shares_with >= 0)
+    {
+      i++; // placed by the entry it shares with
+      continue;
+    }
+
     if (plan[static_cast<std::size_t>(i)].size > compression_batch_bytes)
     {
       auto& p = plan[static_cast<std::size_t>(i)];
@@ -491,7 +501,7 @@ auto place_compressed(
         {
           auto& p = plan[static_cast<std::size_t>(i + k)];
           auto& slot = staging[static_cast<std::size_t>(k)];
-          if (p.size == 0)
+          if (p.size == 0 || p.shares_with >= 0)
           {
             p.method = codec::store;
             return;
@@ -546,6 +556,8 @@ auto place_compressed(
     for (int64_t k = 0; k < count; k++)
     {
       auto& p = plan[static_cast<std::size_t>(i + k)];
+      if (p.shares_with >= 0)
+        continue;
       const int64_t align = (p.method == codec::store) ? payload_alignment
                                                        : compressed_alignment;
       offset = round_up(offset, align);
@@ -559,6 +571,8 @@ auto place_compressed(
         [&](int64_t k)
         {
           auto& p = plan[static_cast<std::size_t>(i + k)];
+          if (p.shares_with >= 0)
+            return;
           auto& slot = staging[static_cast<std::size_t>(k)];
           char* const dst = payloads + p.data_offset;
           if (!slot.empty())
@@ -729,7 +743,11 @@ void writer::commit(std::string_view path)
            "not readable: " + errno_string(errno)});
       continue;
     }
-    plan.push_back(placed{.src = &e, .size = st.st_size});
+    plan.push_back(placed{
+        .src = &e,
+        .size = st.st_size,
+        .device = static_cast<uint64_t>(st.st_dev),
+        .inode = static_cast<uint64_t>(st.st_ino)});
   }
 
   if (!impl->skipped.empty() && impl->policy == on_unreadable::fail)
@@ -758,6 +776,32 @@ void writer::commit(std::string_view path)
   const int64_t n = std::ssize(plan);
   const bool compressing = impl->compress.method != compression::none;
 
+  // The same file can appear under several archive paths, either because the
+  // caller added it twice or because the tree contains hard links. Storing one
+  // copy costs a lookup here and nothing at all at read time: the format never
+  // required payload offsets to be distinct, so two entries can simply point
+  // at the same bytes.
+  {
+    std::unordered_map<uint64_t, int64_t> first_by_file;
+    first_by_file.reserve(static_cast<std::size_t>(n));
+    for (int64_t i = 0; i < n; i++)
+    {
+      auto& p = plan[static_cast<std::size_t>(i)];
+      if (p.size == 0)
+        continue;
+      // Mixing the two into one key keeps this a single hash lookup; a
+      // collision would only ever be resolved by the check below.
+      const uint64_t key = p.device * 0x9e3779b97f4a7c15ull + p.inode;
+      const auto [it, inserted] = first_by_file.try_emplace(key, i);
+      if (inserted)
+        continue;
+      const auto& primary = plan[static_cast<std::size_t>(it->second)];
+      if (primary.device == p.device && primary.inode == p.inode
+          && primary.size == p.size)
+        p.shares_with = it->second;
+    }
+  }
+
   header h{};
   memcpy(h.head, uvfs::ident, sizeof(uvfs::ident));
 
@@ -767,6 +811,8 @@ void writer::commit(std::string_view path)
   {
     p.name_offset = names_size;
     names_size += std::ssize(p.src->path_in_archive);
+    if (p.shares_with >= 0)
+      continue; // its bytes are already accounted for
     // A payload is never stored larger than the file: if compression does not
     // shrink it, the raw bytes are stored instead. So the uncompressed layout
     // is an upper bound on the compressed one.
@@ -850,10 +896,12 @@ void writer::commit(std::string_view path)
         int64_t offset = 0;
         for (auto& p : plan)
         {
+          p.method = codec::store;
+          if (p.shares_with >= 0)
+            continue;
           offset = round_up(offset, payload_alignment);
           p.data_offset = offset;
           p.stored_size = p.size;
-          p.method = codec::store;
           offset += p.size;
         }
         data_used = offset;
@@ -863,6 +911,8 @@ void writer::commit(std::string_view path)
             [&](int64_t i)
             {
               auto& p = plan[static_cast<std::size_t>(i)];
+              if (p.shares_with >= 0)
+                return; // written by the entry it shares with
               char* const dst = payloads + p.data_offset;
               if (p.size == 0)
               {
@@ -904,6 +954,20 @@ void writer::commit(std::string_view path)
 
       if (copy_errors.empty())
       {
+        // Entries sharing a payload adopt the placement of the entry that
+        // actually wrote the bytes. A batch never precedes its own primary,
+        // because the primary is the first occurrence in sorted order.
+        for (auto& p : plan)
+        {
+          if (p.shares_with < 0)
+            continue;
+          const auto& primary = plan[static_cast<std::size_t>(p.shares_with)];
+          p.data_offset = primary.data_offset;
+          p.stored_size = primary.stored_size;
+          p.method = primary.method;
+          p.content_hash = primary.content_hash;
+        }
+
         // --------------------------------------------------------- index
         // Written only now, because with compression the stored size and
         // offset of a payload are not known until it has been placed. The
