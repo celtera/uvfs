@@ -60,7 +60,7 @@ inline void spit(const std::string& p, const std::vector<char>& b)
 //! Offset of entry `i` in a well-formed archive.
 inline auto entry_offset(const std::vector<char>& bytes, int64_t i) -> std::size_t
 {
-  const auto h = header::load_from(bytes.data());
+  const auto h = uvfs::header::load_from(bytes.data());
   return static_cast<std::size_t>(h.index_start + i * entry_size);
 }
 

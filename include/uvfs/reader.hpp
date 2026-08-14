@@ -29,10 +29,34 @@ struct UVFS_EXPORT file_info
   stored_as storage{stored_as::raw};
 };
 
+//! How much of an archive to check when opening it.
+//!
+//! The header is always checked: it is 128 bytes, so its hash is free, and it
+//! is where corruption does the most damage because every other offset is
+//! derived from it. Individual entries are always bounds-checked when used, so
+//! no setting here can turn a corrupt archive into an out-of-bounds read.
+//!
+//! What the levels buy is detection of corruption that is *structurally
+//! plausible*: a flipped bit inside a name, an offset that still points inside
+//! the data region but at the wrong payload.
+enum class integrity
+{
+  //! Header hash only. Opening stays O(1) regardless of archive size.
+  header_only,
+  //! Also hash the whole index at open. Costs one sequential pass over the
+  //! index -- roughly 100us per million files -- and catches any damage to the
+  //! entries, the table or the names.
+  index,
+  //! Also check each payload's content hash the first time it is read, so the
+  //! cost is proportional to what is actually used rather than to the archive.
+  //! Requires an archive written with content hashes.
+  full,
+};
+
 struct UVFS_EXPORT reader
 {
 public:
-  explicit reader(std::string_view path);
+  explicit reader(std::string_view path, integrity check = integrity::header_only);
   reader(const reader&) = delete;
   auto operator=(const reader&) -> reader& = delete;
   reader(reader&&) noexcept;
@@ -48,7 +72,9 @@ public:
   //! aligned. Returns nullopt when the entry is absent *or* is compressed,
   //! since a compressed entry has no verbatim bytes to point at. Use read()
   //! when the entry may be compressed, or stat() to find out which it is.
-  [[nodiscard]] auto find(std::string_view path) const noexcept
+  //! Throws only under integrity::full, when the payload fails its checksum --
+  //! a damaged payload is reported rather than quietly reported as missing.
+  [[nodiscard]] auto find(std::string_view path) const
       -> std::optional<byte_array>;
 
   //! Metadata without touching the payload.

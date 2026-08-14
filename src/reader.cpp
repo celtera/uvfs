@@ -21,6 +21,7 @@ struct reader::impl
 
   fd_handle handle;
   mmap_handle<const char*> map;
+  integrity check{integrity::header_only};
 
   header h{};
   const char* index{};    //!< start of the index region
@@ -73,6 +74,22 @@ struct reader::impl
     return {names + e.name_offset, e.name_size};
   }
 
+  //! Checks one payload against its stored content hash. Only called when the
+  //! reader was opened with integrity::full, so the cost lands on the entries
+  //! actually read rather than on every open.
+  void verify_payload(int64_t i, const entry& e, std::string_view name) const
+  {
+    if (check != integrity::full || !hashes)
+      return;
+    const auto want = load<uint64_t>(hashes + i * 8);
+    const auto got = hash_bytes(
+        payloads + e.data_offset, static_cast<std::size_t>(e.stored_size));
+    if (got != want)
+      throw std::runtime_error(
+          "uvfs: content checksum mismatch for " + std::string{name}
+          + ", the payload is damaged");
+  }
+
   [[nodiscard]] auto checked_entry_at(int64_t i) const -> entry
   {
     const entry e = entry_at(i);
@@ -117,9 +134,10 @@ struct reader::impl
   }
 };
 
-reader::reader(std::string_view path)
+reader::reader(std::string_view path, integrity check)
 try : impl{std::make_unique<struct impl>(path)}
 {
+  impl->check = check;
   const auto filesize = impl->handle.filesize();
   if (filesize < header_size)
     throw std::runtime_error("uvfs: file is smaller than a header: ");
@@ -128,6 +146,18 @@ try : impl{std::make_unique<struct impl>(path)}
   const char* const base = impl->map.bytes;
 
   impl->h = header::load_from(base);
+
+  // Identity first, so a file that is not an archive at all, or is a newer
+  // format, gets a message that says so.
+  impl->h.check_identity();
+
+  // Then the header hash, before any offset in it is believed: every other
+  // region in the file is located through these 128 bytes. It covers 120
+  // bytes, so it is free, and therefore not optional.
+  if (impl->h.header_hash != hash_bytes(base, header::hashed_prefix))
+    throw std::runtime_error(
+        "uvfs: header checksum mismatch, the file is damaged: ");
+
   impl->h.validate(filesize);
 
   // Opening is exactly this: map, check the header, take pointers. There is
@@ -140,6 +170,18 @@ try : impl{std::make_unique<struct impl>(path)}
       = h.has(flag_entry_hashes) ? impl->index + h.hashes_offset() : nullptr;
   impl->names = impl->index + h.names_offset();
   impl->payloads = base + h.data_start;
+
+  if (check != integrity::header_only)
+  {
+    if (impl->h.index_hash
+        != hash_bytes(impl->index, static_cast<std::size_t>(h.index_size)))
+      throw std::runtime_error(
+          "uvfs: index checksum mismatch, the archive is damaged: ");
+  }
+  if (check == integrity::full && !impl->hashes)
+    throw std::runtime_error(
+        "uvfs: full integrity checking was asked for but this archive has no "
+        "content hashes: ");
 }
 catch (const std::runtime_error& e)
 {
@@ -195,8 +237,7 @@ auto reader::stat(std::string_view path) const noexcept -> std::optional<file_in
   return to_info(impl->name_at(e), e);
 }
 
-auto reader::find(std::string_view path) const noexcept
-    -> std::optional<byte_array>
+auto reader::find(std::string_view path) const -> std::optional<byte_array>
 {
   const auto i = impl->lookup(path);
   if (i < 0)
@@ -204,6 +245,7 @@ auto reader::find(std::string_view path) const noexcept
   const entry e = impl->entry_at(i);
   if (e.method != codec::store)
     return std::nullopt; // no verbatim bytes to point at
+  impl->verify_payload(i, e, path);
   return byte_array(
       impl->payloads + e.data_offset, static_cast<std::size_t>(e.stored_size));
 }
@@ -215,6 +257,7 @@ void reader::for_each_file(function_ref<bool(iter_entry)> func) const
   {
     const entry e = impl->checked_entry_at(i);
     const auto name = impl->name_at(e);
+    impl->verify_payload(i, e, name);
     const auto bytes
         = e.method == codec::store
               ? byte_array(
@@ -232,7 +275,8 @@ auto reader::read_into(std::string_view path, char* out, int64_t capacity) const
   const auto i = impl->lookup(path);
   if (i < 0)
     return std::nullopt;
-  const entry e = impl->entry_at(i);
+  const entry e = impl->checked_entry_at(i);
+  impl->verify_payload(i, e, path);
   if (capacity < e.orig_size)
     throw std::runtime_error(
         "uvfs: buffer of " + std::to_string(capacity) + " bytes is too small for "

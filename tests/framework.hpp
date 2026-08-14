@@ -167,7 +167,7 @@ inline auto expected_bytes(std::size_t n, uint64_t seed = 1) -> std::string
       name, &UVFS_CAT(uvfs_test_fn_, __LINE__)};                                   \
   static void UVFS_CAT(uvfs_test_fn_, __LINE__)()
 
-#define CHECK(expr) ::uvfs::test::report(!!(expr), __FILE__, __LINE__, #expr, {})
+#define CHECK(...) ::uvfs::test::report(!!(__VA_ARGS__), __FILE__, __LINE__, #__VA_ARGS__, {})
 
 #define CHECK_EQ(a, b)                                                             \
   do                                                                               \
@@ -180,36 +180,36 @@ inline auto expected_bytes(std::size_t n, uint64_t seed = 1) -> std::string
             + ::uvfs::test::show(uvfs_b_));                                        \
   } while (0)
 
-#define CHECK_THROWS(expr)                                                         \
+#define CHECK_THROWS(...)                                                         \
   do                                                                               \
   {                                                                                \
     bool uvfs_threw_ = false;                                                      \
     try                                                                            \
     {                                                                              \
-      expr;                                                                        \
+      __VA_ARGS__;                                                                 \
     }                                                                              \
     catch (const std::exception&)                                                  \
     {                                                                              \
       uvfs_threw_ = true;                                                          \
     }                                                                              \
     ::uvfs::test::report(                                                          \
-        uvfs_threw_, __FILE__, __LINE__, #expr " throws",                          \
+        uvfs_threw_, __FILE__, __LINE__, #__VA_ARGS__ " throws",                          \
         uvfs_threw_ ? "" : "no exception was thrown");                             \
   } while (0)
 
-#define CHECK_NOTHROW(expr)                                                        \
+#define CHECK_NOTHROW(...)                                                        \
   do                                                                               \
   {                                                                                \
     std::string uvfs_err_;                                                         \
     try                                                                            \
     {                                                                              \
-      expr;                                                                        \
+      __VA_ARGS__;                                                                 \
     }                                                                              \
     catch (const std::exception& e)                                                \
     {                                                                              \
       uvfs_err_ = e.what();                                                        \
     }                                                                              \
     ::uvfs::test::report(                                                          \
-        uvfs_err_.empty(), __FILE__, __LINE__, #expr " does not throw",            \
+        uvfs_err_.empty(), __FILE__, __LINE__, #__VA_ARGS__ " does not throw",            \
         uvfs_err_.empty() ? "" : "threw: " + uvfs_err_);                           \
   } while (0)

@@ -264,7 +264,12 @@ struct header
   // corrupt values, and signed overflow is undefined behaviour, so the check
   // itself would be the bug. `a > limit - b` cannot overflow once `b <= limit`
   // is known.
-  void validate(int64_t filesize) const
+  //! Is this a uvfs archive of a version we speak? Checked before the header
+  //! hash so that a file which simply is not an archive, or is a newer one,
+  //! says so instead of reporting a checksum mismatch. A genuinely newer
+  //! archive still has a valid header hash, so this ordering does not weaken
+  //! corruption detection.
+  void check_identity() const
   {
     if (memcmp(magic, this->head, sizeof(magic)) != 0)
       throw std::runtime_error("uvfs: not a uvfs archive: ");
@@ -274,6 +279,11 @@ struct header
           "uvfs: unsupported format version " + std::to_string(version())
           + " (this build reads version " + std::to_string(format_version)
           + "): ");
+  }
+
+  void validate(int64_t filesize) const
+  {
+    check_identity();
 
     if ((flag_bits & ~static_cast<uint32_t>(flag_all_known)) != 0)
       throw std::runtime_error(

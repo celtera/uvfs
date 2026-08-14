@@ -66,6 +66,11 @@ public:
   //! Controls what happens when an archive path is added twice. Default: fail.
   void set_duplicate_policy(on_duplicate policy) noexcept;
 
+  //! Store a content hash per entry so readers can detect a damaged payload.
+  //! Costs 8 bytes per file and one extra pass over data that is already in
+  //! cache from the copy. On by default.
+  void set_content_hashes(bool enabled) noexcept;
+
   //! Builds the archive. The output appears atomically: it is written to a
   //! temporary file in the same directory and renamed into place, so an
   //! interrupted or failed commit never leaves a partial archive behind.

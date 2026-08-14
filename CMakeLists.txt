@@ -96,6 +96,7 @@ if(UVFS_BUILD_TESTS)
     tests/test_writer.cpp
     tests/test_paths.cpp
     tests/test_index.cpp
+    tests/test_integrity.cpp
   )
   target_link_libraries(uvfs_tests
     PRIVATE uvfs_reader uvfs_writer $<BUILD_INTERFACE:uvfs_build_settings>)

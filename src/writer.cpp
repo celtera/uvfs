@@ -47,6 +47,7 @@ struct writer::impl
   std::vector<skipped_file> skipped;
   on_unreadable policy{on_unreadable::fail};
   on_duplicate duplicates{on_duplicate::fail};
+  bool content_hashes{true};
 };
 
 writer::writer()
@@ -80,6 +81,11 @@ void writer::set_unreadable_policy(on_unreadable policy) noexcept
 void writer::set_duplicate_policy(on_duplicate policy) noexcept
 {
   impl->duplicates = policy;
+}
+
+void writer::set_content_hashes(bool enabled) noexcept
+{
+  impl->content_hashes = enabled;
 }
 
 auto writer::skipped() const noexcept -> const std::vector<skipped_file>&
@@ -221,6 +227,8 @@ void writer::commit(std::string_view path)
   h.file_count = std::ssize(plan);
   h.table_capacity = table_capacity_for(h.file_count);
   h.names_size = names_size;
+  if (impl->content_hashes)
+    h.flag_bits |= flag_entry_hashes;
   h.index_start = round_up_64(header_size);
   h.index_size = h.names_offset() + names_size;
   h.data_start = round_up_64(h.index_start + h.index_size);
@@ -293,6 +301,9 @@ void writer::commit(std::string_view path)
       // so there is no producer to wait on, nothing spins, and a thread that
       // finishes early simply takes the next item.
       const int64_t n = std::ssize(plan);
+      // Hashing the payload while it is still in cache from the copy is far
+      // cheaper than a second pass over the finished archive.
+      std::vector<uint64_t> content(static_cast<std::size_t>(n), 0);
       unsigned hw = std::thread::hardware_concurrency();
       if (hw == 0)
         hw = 4;
@@ -310,8 +321,12 @@ void writer::commit(std::string_view path)
           if (i >= n)
             return;
           const auto& p = plan[static_cast<size_t>(i)];
+          char* const dst = data.bytes + h.data_start + p.target_offset;
           if (p.size == 0)
+          {
+            content[static_cast<std::size_t>(i)] = hash_bytes("", 0);
             continue;
+          }
 
           // An exception escaping a thread's entry point calls
           // std::terminate, which is why archiving a live directory used to
@@ -328,10 +343,9 @@ void writer::commit(std::string_view path)
                   + "): ");
 
             auto srcfile = fd.map_ro(actual);
-            if (actual > 0)
-              memcpy(
-                  data.bytes + h.data_start + p.target_offset, srcfile.bytes,
-                  static_cast<size_t>(actual));
+            memcpy(dst, srcfile.bytes, static_cast<size_t>(actual));
+            content[static_cast<std::size_t>(i)]
+                = hash_bytes(dst, static_cast<std::size_t>(actual));
           }
           catch (const std::exception& ex)
           {
@@ -351,6 +365,23 @@ void writer::commit(std::string_view path)
 
       if (copy_errors.empty())
       {
+        // ------------------------------------------------------- integrity
+        // Order matters: the content hashes live inside the index, the index
+        // hash covers the index, and the header hash covers the header --
+        // including the index hash. So they have to be written outwards.
+        if (h.has(flag_entry_hashes))
+        {
+          auto* const hashes = index + h.hashes_offset();
+          for (int64_t i = 0; i < n; i++)
+            store<uint64_t>(hashes + i * 8, content[static_cast<std::size_t>(i)]);
+        }
+
+        h.index_hash
+            = hash_bytes(index, static_cast<std::size_t>(h.index_size));
+        h.store_to(data.bytes);
+        h.header_hash = hash_bytes(data.bytes, header::hashed_prefix);
+        store<uint64_t>(data.bytes + header::hashed_prefix, h.header_hash);
+
         // Push our own dirty pages, rather than every dirty page on the
         // machine, which is what a bare sync() does.
         if (msync(data.bytes, static_cast<size_t>(h.file_size), MS_SYNC) != 0)
