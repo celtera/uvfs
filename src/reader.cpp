@@ -21,7 +21,7 @@ struct loaded_file_entry
 struct reader::impl
 {
   explicit impl(std::string_view path)
-      : handle{fd_handle::open_ro(path)}
+      : handle{fd_handle::open_ro(std::string{path}.c_str())}
   {
   }
 

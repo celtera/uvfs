@@ -44,7 +44,6 @@ endif()
 # ------------------------------------------------------------------ 3rdparty
 set(UVFS_UNORDERED_DENSE_INC
     ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/unordered_dense/include)
-set(UVFS_RWQUEUE_INC ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/readerwriterqueue)
 
 # ------------------------------------------------------------------- library
 add_library(uvfs_reader STATIC
@@ -72,7 +71,6 @@ add_library(uvfs::writer ALIAS uvfs_writer)
 target_compile_features(uvfs_writer PUBLIC cxx_std_20)
 target_compile_definitions(uvfs_writer PRIVATE UVFS_BUILD_LIBRARY=1)
 target_link_libraries(uvfs_writer PRIVATE $<BUILD_INTERFACE:uvfs_build_settings>)
-target_include_directories(uvfs_writer SYSTEM PRIVATE ${UVFS_RWQUEUE_INC})
 target_include_directories(uvfs_writer PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
@@ -93,6 +91,7 @@ if(UVFS_BUILD_TESTS)
     tests/main.cpp
     tests/test_roundtrip.cpp
     tests/test_format.cpp
+    tests/test_writer.cpp
   )
   target_link_libraries(uvfs_tests
     PRIVATE uvfs_reader uvfs_writer $<BUILD_INTERFACE:uvfs_build_settings>)
