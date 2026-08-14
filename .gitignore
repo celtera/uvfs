@@ -53,3 +53,9 @@ _deps
 
 # build trees
 build*/
+
+# libFuzzer artifacts
+crash-*
+timeout-*
+oom-*
+leak-*

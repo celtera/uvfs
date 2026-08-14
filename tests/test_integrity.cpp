@@ -206,3 +206,71 @@ UVFS_TEST("integrity/mutation_sweep_with_index_checking")
       structural_total);
   CHECK_EQ(structural_accepted, 0);
 }
+
+UVFS_TEST("integrity/lookup_terminates_when_the_table_has_no_empty_slot")
+{
+  // Found by the fuzzer. validate() checks the hash table's *capacity* against
+  // the file count, but nothing checks its contents. Linear probing stopped
+  // only at an empty slot, so a table corrupted to be entirely full made
+  // find() of an absent key loop forever -- a hang, not a crash, which is why
+  // the mutation tests never caught it: they all terminate.
+  scratch_dir dir{"fulltable"};
+  const auto arc = dir / "out.uvfs";
+  uvfs::writer w;
+  w.add_file("/aa", dir.make_file("a", 32, 1));
+  w.add_file("/bb", dir.make_file("b", 32, 2));
+  w.commit(arc);
+
+  auto bytes = slurp(arc);
+  const auto h = uvfs::header::load_from(bytes.data());
+  auto* const table = bytes.data() + h.index_start + h.table_offset();
+  // Fill every slot with a value that is not the empty sentinel and whose
+  // fingerprint will not match, so no probe ever succeeds or stops.
+  for (int64_t i = 0; i < h.table_capacity; i++)
+  {
+    const uint64_t occupied = 0x1234'5678'0000'0000ull;
+    std::memcpy(table + i * 8, &occupied, sizeof occupied);
+  }
+  const auto bad = dir / "bad.uvfs";
+  spit(bad, bytes);
+
+  uvfs::reader r{bad, uvfs::integrity::header_only};
+  // If the bound is missing this never returns and the test suite hangs.
+  CHECK(!r.find("/definitely/not/present").has_value());
+  CHECK(!r.find("/aa").has_value());
+  CHECK(!r.stat("").has_value());
+
+  // A table with no empty slot that *does* still hold a real entry must find
+  // it: the bound must not cut a legitimate probe short.
+  auto bytes2 = slurp(arc);
+  auto* const table2 = bytes2.data() + h.index_start + h.table_offset();
+  // Preserve a genuinely occupied slot, not slot 0 -- with 8 slots and 2
+  // entries, slot 0 is very likely empty, and keeping an empty sentinel there
+  // would stop the probe early and test nothing.
+  int64_t real_slot = -1;
+  uint64_t keep = 0;
+  for (int64_t i = 0; i < h.table_capacity; i++)
+  {
+    const auto v = uvfs::load<uint64_t>(table2 + i * 8);
+    if (v != uvfs::empty_slot)
+    {
+      real_slot = i;
+      keep = v;
+      break;
+    }
+  }
+  CHECK(real_slot >= 0);
+  for (int64_t i = 0; i < h.table_capacity; i++)
+  {
+    const uint64_t occupied = 0x1234'5678'0000'0000ull;
+    std::memcpy(table2 + i * 8, &occupied, sizeof occupied);
+  }
+  std::memcpy(table2 + real_slot * 8, &keep, sizeof keep);
+  const auto bad2 = dir / "bad2.uvfs";
+  spit(bad2, bytes2);
+  uvfs::reader r2{bad2, uvfs::integrity::header_only};
+  int found = 0;
+  for (int64_t i = 0; i < r2.count(); i++)
+    found += r2.stat(r2.at(i).path).has_value();
+  CHECK(found >= 1);
+}

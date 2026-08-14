@@ -123,7 +123,13 @@ struct reader::impl
     const uint64_t fingerprint = hv >> 32;
     const auto mask = static_cast<uint64_t>(h.table_capacity - 1);
     uint64_t slot = hv & mask;
-    for (;;)
+    // The probe is bounded by the table size rather than relying on finding an
+    // empty slot. A well-formed table is at most 70% full, so a miss stops
+    // after a couple of probes; but validate() checks the table's *capacity*,
+    // not its contents, and a corrupt table with no empty slot anywhere would
+    // otherwise spin forever. After `capacity` probes every slot has been
+    // visited, so there is nothing left to find.
+    for (int64_t probes = 0; probes < h.table_capacity; probes++)
     {
       const uint64_t s = load<uint64_t>(table + slot * 8);
       if (s == empty_slot)
@@ -142,6 +148,7 @@ struct reader::impl
       }
       slot = (slot + 1) & mask;
     }
+    return -1; // every slot probed: the table has no empty slot (corrupt)
   }
 };
 
