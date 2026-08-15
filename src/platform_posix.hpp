@@ -44,7 +44,11 @@ inline constexpr const char* backend_name = "posix";
 // copy_file_range moves bytes between two files without them entering user
 // space, and on filesystems that support reflinks it does not copy at all.
 // Linux has had it since 4.5, FreeBSD since 13.
-#if defined(__linux__) || (defined(__FreeBSD__) && __FreeBSD__ >= 13)
+// UVFS_FORCE_GENERIC_COPY exists so that the fallback can be exercised on a
+// system that does have the fast path; otherwise it is only ever compiled on
+// the platforms that cannot test it.
+#if (defined(__linux__) || (defined(__FreeBSD__) && __FreeBSD__ >= 13)) \
+    && !defined(UVFS_FORCE_GENERIC_COPY)
 inline constexpr bool has_kernel_copy = true;
 #else
 inline constexpr bool has_kernel_copy = false;
@@ -408,64 +412,56 @@ inline void copy_file_into(
   if (n <= 0)
     return;
 
+    // A preprocessor guard, not `if constexpr`: this function is not a template,
+    // and in a non-template the discarded branch of an `if constexpr` still has
+    // to name-lookup successfully. macOS has no copy_file_range, so mentioning it
+    // at all failed to compile there even though the branch was never taken.
+#if (defined(__linux__) || (defined(__FreeBSD__) && __FreeBSD__ >= 13)) \
+    && !defined(UVFS_FORCE_GENERIC_COPY)
   // Below this the extra syscall costs more than the copy saves.
   constexpr int64_t kernel_copy_threshold = int64_t{256} * 1024;
-
-  if constexpr (has_kernel_copy)
+  if (n >= kernel_copy_threshold)
   {
-    if (n >= kernel_copy_threshold)
+    int64_t done = 0;
+    while (done < n)
     {
-      int64_t done = 0;
-      while (done < n)
+      off_t in_off = done;
+      off_t out_off = dst_offset + done;
+      const auto moved = ::copy_file_range(
+          src.native(),
+          &in_off,
+          dst.native(),
+          &out_off,
+          static_cast<size_t>(n - done),
+          0);
+      if (moved > 0)
       {
-        off_t in_off = done;
-        off_t out_off = dst_offset + done;
-#if defined(__linux__)
-        const auto moved = ::copy_file_range(
-            src.native(),
-            &in_off,
-            dst.native(),
-            &out_off,
-            static_cast<size_t>(n - done),
-            0);
-#else
-        const auto moved = ::copy_file_range(
-            src.native(),
-            &in_off,
-            dst.native(),
-            &out_off,
-            static_cast<size_t>(n - done),
-            0);
-#endif
-        if (moved > 0)
-        {
-          done += moved;
-          continue;
-        }
-        if (moved < 0 && errno == EINTR)
-          continue;
-        break; // not supported here (EXDEV, EINVAL, ...); finish by hand
+        done += moved;
+        continue;
       }
-      if (done == n)
-        return;
-      // Partially copied by the kernel: finish the rest ourselves. The source
-      // offset stays absolute while the destination is addressed through the
-      // mapping when there is one.
-      if (dst_mapped)
-      {
-        const auto got = src.read_at(dst_mapped + done, n - done, done);
-        if (got != n - done)
-          throw std::runtime_error("uvfs: file ended early: ");
-        return;
-      }
-      std::vector<char> buf(static_cast<std::size_t>(n - done));
-      const auto got = src.read_at(buf.data(), n - done, done);
-      if (got != n - done)
+      if (moved < 0 && errno == EINTR)
+        continue;
+      break; // not supported here (EXDEV, EINVAL, ...); finish by hand
+    }
+    if (done == n)
+      return;
+    // Partially copied by the kernel: finish the rest ourselves. The source
+    // offset stays absolute while the destination is addressed through the
+    // mapping when there is one.
+    if (dst_mapped)
+    {
+      if (src.read_at(dst_mapped + done, n - done, done) != n - done)
         throw std::runtime_error("uvfs: file ended early: ");
-      dst.write_at(buf.data(), got, dst_offset + done);
       return;
     }
+    std::vector<char> buf(static_cast<std::size_t>(n - done));
+    const auto got = src.read_at(buf.data(), n - done, done);
+    if (got != n - done)
+      throw std::runtime_error("uvfs: file ended early: ");
+    dst.write_at(buf.data(), got, dst_offset + done);
+    return;
   }
+#endif
 
   if (dst_mapped)
   {
