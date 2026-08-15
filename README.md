@@ -247,7 +247,8 @@ Compression is CPU-bound and uses every thread available.
 - 2³¹−2 files per archive.
 - 65535 bytes per path, and 4 GiB of archive paths in total (a 32-bit offset
   per entry into one name blob). Both are enforced at write time.
-- POSIX only. `mmap`, `pread`, `copy_file_range`; no Windows backend yet.
+- POSIX only. `mmap`, `pread`, `copy_file_range`; there is no Windows backend,
+  so MSVC and MinGW are not built or tested. Cygwin would work but is untried.
 - Little-endian only, checked at compile time.
 - No metadata: no mode, mtime, ownership, symlinks or directories.
 - Payloads are shared between entries that name the same file (same inode) or
@@ -258,6 +259,29 @@ Compression is CPU-bound and uses every thread available.
 - Per-entry overhead is ~50 bytes plus alignment padding, which is significant
   for files of only a few hundred bytes (see above).
 - Archives are written whole; there is no append or update in place.
+
+## Supported platforms
+
+Built and tested in CI on every push:
+
+| | |
+| --- | --- |
+| Linux x86_64 / arm64 | gcc 12–16, clang 17–21, libstdc++ and libc++ |
+| libc | glibc and musl (Alpine), x86_64 and arm64 |
+| macOS | arm64 (latest) and x86_64 (13) |
+| BSD | FreeBSD, OpenBSD, NetBSD |
+| Standards | C++20, C++23, C++26 |
+| Sanitizers | ASan, UBSan, TSan, valgrind, `_GLIBCXX_DEBUG` |
+
+Plus, on every push: clang-tidy and cppcheck as errors, clang-format, a
+libFuzzer run over the reader, byte-for-byte reproducibility, a command line
+round trip across every compression setting, installed-package and
+`add_subdirectory` consumption, a build with zstd disabled, and a check that
+the little-endian guard actually fires on s390x rather than silently writing
+byte-swapped archives.
+
+Windows is the notable gap: uvfs is built on `mmap` and `pread`, and there is
+no Win32 backend yet, so there is nothing for MSVC to compile.
 
 ## Licence
 

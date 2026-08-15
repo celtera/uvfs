@@ -1,0 +1,180 @@
+name: Sanitizers
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  address_undefined:
+    name: ASan+UBSan ${{ matrix.cxx }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [g++, clang++]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build libzstd-dev
+
+      - name: Build
+        run: |
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
+            -DUVFS_SANITIZE=address,undefined
+          cmake --build build --parallel
+
+      - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=1:detect_stack_use_after_return=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ./build/uvfs_tests
+
+  thread:
+    name: ThreadSanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build libzstd-dev util-linux
+
+      - name: Build
+        run: |
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DUVFS_SANITIZE=thread
+          cmake --build build --parallel
+
+      # TSan aborts at startup with "unexpected memory mapping" on kernels
+      # whose ASLR entropy exceeds what its shadow mapping allows, and it exits
+      # 0 doing so -- a run then looks clean because nothing ran at all.
+      # setarch -R disables randomisation for the child.
+      - name: Test
+        env:
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: |
+          setarch $(uname -m) -R ./build/uvfs_tests | tee tsan.log
+          # Guard against the silent-no-op failure mode above.
+          grep -q "0 failure" tsan.log
+
+      - name: Concurrent readers over a compressed archive
+        env:
+          TSAN_OPTIONS: halt_on_error=1
+        run: |
+          cat > /tmp/conc.cpp <<'EOF'
+          #include <uvfs/reader.hpp>
+          #include <uvfs/writer.hpp>
+          #include <atomic>
+          #include <cstdio>
+          #include <filesystem>
+          #include <thread>
+          #include <vector>
+          int main()
+          {
+            std::vector<std::string> in;
+            for (auto& e : std::filesystem::recursive_directory_iterator("include"))
+              if (e.is_regular_file())
+                in.push_back(e.path().string());
+            for (auto& e : std::filesystem::recursive_directory_iterator("src"))
+              if (e.is_regular_file())
+                in.push_back(e.path().string());
+            uvfs::writer w;
+            uvfs::compression_settings cs;
+            cs.method = uvfs::compression::automatic;
+            cs.dictionary_size = 16384;
+            w.set_compression(cs);
+            for (auto& p : in)
+              w.add_file("/" + p, p);
+            w.commit("conc.uvfs");
+
+            uvfs::reader r{"conc.uvfs", uvfs::integrity::index};
+            std::atomic<long long> total{0};
+            std::vector<std::thread> t;
+            for (int k = 0; k < 8; k++)
+              t.emplace_back([&, k] {
+                long long local = 0;
+                for (int64_t i = k; i < r.count(); i += 8)
+                {
+                  auto e = r.at(i);
+                  if (auto v = r.read(e.path)) local += (long long)v->size();
+                  (void)r.find(e.path);
+                  (void)r.stat(e.path);
+                }
+                total += local;
+              });
+            for (auto& x : t) x.join();
+            std::printf("%lld bytes, %zu damaged\n", total.load(), r.verify().size());
+            return 0;
+          }
+          EOF
+          ${CXX:-c++} -O1 -g -std=c++20 -fsanitize=thread /tmp/conc.cpp -o /tmp/conc \
+            -Iinclude -Lbuild -luvfs_reader -luvfs_writer -lzstd
+          setarch $(uname -m) -R /tmp/conc
+
+  valgrind:
+    name: Valgrind
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build libzstd-dev valgrind
+
+      - name: Build
+        run: |
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build --parallel
+
+      # The full suite under valgrind would take hours because of the
+      # multi-gigabyte and memory-limit tests, so this covers the format and
+      # reader work, which is where a lost write or an uninitialised read would
+      # actually hide.
+      - name: Run
+        run: |
+          valgrind --error-exitcode=1 --errors-for-leak-kinds=definite \
+            --leak-check=full --track-origins=yes \
+            ./build/uvfs_tests format
+          valgrind --error-exitcode=1 --leak-check=full \
+            ./build/uvfs_tests index
+          valgrind --error-exitcode=1 --leak-check=full \
+            ./build/uvfs_tests integrity/intact
+
+  glibcxx_debug:
+    name: libstdc++ debug mode
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build libzstd-dev
+
+      # Turns undefined container and iterator usage into a diagnosed abort
+      # rather than something that happens to work on this standard library.
+      - name: Build and test
+        run: |
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-D_GLIBCXX_DEBUG=1 -D_GLIBCXX_DEBUG_PEDANTIC=1 -D_GLIBCXX_ASSERTIONS=1"
+          cmake --build build --parallel
+          ctest --test-dir build --output-on-failure

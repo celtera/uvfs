@@ -86,13 +86,16 @@ add_library(uvfs_reader STATIC
   src/format.hpp
 )
 add_library(uvfs::reader ALIAS uvfs_reader)
+# Without EXPORT_NAME the installed target would be uvfs::uvfs_reader, so the
+# spelling that works via add_subdirectory would not work via find_package.
+set_target_properties(uvfs_reader PROPERTIES EXPORT_NAME reader)
 
 target_compile_features(uvfs_reader PUBLIC cxx_std_20)
 target_compile_definitions(uvfs_reader PRIVATE UVFS_BUILD_LIBRARY=1)
 target_link_libraries(uvfs_reader PRIVATE $<BUILD_INTERFACE:uvfs_build_settings>)
 target_include_directories(uvfs_reader SYSTEM PRIVATE ${UVFS_XXHASH_INC})
 if(UVFS_ZSTD_FOUND)
-  target_link_libraries(uvfs_reader PRIVATE $<BUILD_INTERFACE:uvfs_zstd>)
+  target_link_libraries(uvfs_reader PRIVATE uvfs_zstd)
   target_compile_definitions(uvfs_reader PRIVATE UVFS_HAS_ZSTD=1)
 endif()
 target_include_directories(uvfs_reader PUBLIC
@@ -105,13 +108,14 @@ add_library(uvfs_writer STATIC
   src/format.hpp
 )
 add_library(uvfs::writer ALIAS uvfs_writer)
+set_target_properties(uvfs_writer PROPERTIES EXPORT_NAME writer)
 
 target_compile_features(uvfs_writer PUBLIC cxx_std_20)
 target_compile_definitions(uvfs_writer PRIVATE UVFS_BUILD_LIBRARY=1)
 target_link_libraries(uvfs_writer PRIVATE $<BUILD_INTERFACE:uvfs_build_settings>)
 target_include_directories(uvfs_writer SYSTEM PRIVATE ${UVFS_XXHASH_INC})
 if(UVFS_ZSTD_FOUND)
-  target_link_libraries(uvfs_writer PRIVATE $<BUILD_INTERFACE:uvfs_zstd>)
+  target_link_libraries(uvfs_writer PRIVATE uvfs_zstd)
   target_compile_definitions(uvfs_writer PRIVATE UVFS_HAS_ZSTD=1)
 endif()
 target_include_directories(uvfs_writer PUBLIC
@@ -210,4 +214,38 @@ install(DIRECTORY include/uvfs DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(EXPORT uvfsTargets
   FILE uvfsTargets.cmake
   NAMESPACE uvfs::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/uvfs)
+
+# A package config so that find_package(uvfs) works against an install tree,
+# not just add_subdirectory. zstd is looked up again on the consumer side
+# because the reader links it privately but still needs it at link time for a
+# static library.
+include(CMakePackageConfigHelpers)
+write_basic_package_version_file(
+  ${CMAKE_CURRENT_BINARY_DIR}/uvfsConfigVersion.cmake
+  VERSION ${PROJECT_VERSION}
+  COMPATIBILITY SameMajorVersion)
+
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/uvfsConfig.cmake.in
+"@PACKAGE_INIT@
+include(CMakeFindDependencyMacro)
+if(@UVFS_ZSTD_FOUND@)
+  find_dependency(PkgConfig QUIET)
+  if(PkgConfig_FOUND)
+    pkg_check_modules(ZSTD QUIET IMPORTED_TARGET libzstd)
+  endif()
+endif()
+find_dependency(Threads)
+include("\${CMAKE_CURRENT_LIST_DIR}/uvfsTargets.cmake")
+check_required_components(uvfs)
+")
+
+configure_package_config_file(
+  ${CMAKE_CURRENT_BINARY_DIR}/uvfsConfig.cmake.in
+  ${CMAKE_CURRENT_BINARY_DIR}/uvfsConfig.cmake
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/uvfs)
+
+install(FILES
+  ${CMAKE_CURRENT_BINARY_DIR}/uvfsConfig.cmake
+  ${CMAKE_CURRENT_BINARY_DIR}/uvfsConfigVersion.cmake
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/uvfs)

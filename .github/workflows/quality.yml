@@ -1,0 +1,182 @@
+name: Quality
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    name: clang-format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned: clang-format's output drifts between major versions, so an
+      # unpinned check turns into a spurious failure the day the runner image
+      # moves. The tree is formatted with this exact version.
+      - name: Check formatting
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq clang-format-18
+          clang-format-18 --version
+          find src include tests \( -name '*.cpp' -o -name '*.hpp' \) -print0 \
+            | xargs -0 clang-format-18 --dry-run --Werror
+
+  tidy:
+    name: clang-tidy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build libzstd-dev clang-tidy
+
+      - name: Analyse
+        run: |
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          cmake --build build --parallel --target uvfs_reader uvfs_writer
+          # Our own sources only: the vendored headers are not ours to fix.
+          run-clang-tidy -p build -header-filter='(src|include/uvfs)/' \
+            src/reader.cpp src/writer.cpp
+
+  cppcheck:
+    name: cppcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq cppcheck ninja-build libzstd-dev
+      - name: Analyse
+        run: |
+          cmake -S . -B build -GNinja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          cppcheck --project=build/compile_commands.json \
+            --enable=warning,performance,portability \
+            --inline-suppr --error-exitcode=1 \
+            --suppressions-list=.cppcheck-suppressions \
+            --suppress=missingIncludeSystem \
+            -i 3rdparty
+
+  # The format promises little-endian only, and enforces it with a
+  # static_assert. This checks the guard actually fires rather than the archive
+  # being written with the bytes the other way round.
+  big_endian:
+    name: Big-endian is refused
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: A big-endian target must fail to compile, and say why
+        run: |
+          set +e
+          out=$(docker run --rm --platform linux/s390x -v "$PWD":/src:ro alpine:3.20 sh -c '
+            apk add --no-cache build-base cmake ninja zstd-dev linux-headers >/dev/null 2>&1
+            cp -r /src /tmp/uvfs && cd /tmp/uvfs && rm -rf build*
+            cmake -S . -B b -GNinja >/dev/null 2>&1
+            cmake --build b 2>&1' )
+          echo "$out" | tail -20
+          if echo "$out" | grep -q "requires a little-endian CPU"; then
+            echo "guard fired as intended"
+          else
+            echo "expected the little-endian static_assert to fire on s390x"
+            exit 1
+          fi
+
+  # Compression runs in parallel; offsets are assigned in sorted order so the
+  # output must not depend on thread scheduling. This is easy to break and
+  # impossible to notice by hand.
+  reproducible:
+    name: Reproducible output
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build libzstd-dev
+
+      - name: Build
+        run: |
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+
+      - name: The same inputs must produce the same bytes
+        run: |
+          for run in 1 2 3; do
+            ./build/uvfs create out-$run.uvfs --compress --dict=16384 src include tests
+          done
+          sha256sum out-*.uvfs
+          if [ "$(sha256sum out-*.uvfs | awk '{print $1}' | sort -u | wc -l)" != "1" ]; then
+            echo "archives differ between runs"
+            exit 1
+          fi
+
+      - name: ...and must not depend on the thread count
+        run: |
+          ./build/uvfs create t1.uvfs --compress --threads=1 src include
+          ./build/uvfs create t8.uvfs --compress --threads=8 src include
+          ./build/uvfs create t32.uvfs --compress --threads=32 src include
+          sha256sum t1.uvfs t8.uvfs t32.uvfs
+          if [ "$(sha256sum t*.uvfs | awk '{print $1}' | sort -u | wc -l)" != "1" ]; then
+            echo "archive depends on the thread count"
+            exit 1
+          fi
+
+  # Exercises the command line tool end to end, since it is what most people
+  # will actually touch first.
+  cli:
+    name: Command line round trip
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build libzstd-dev
+
+      - name: Build
+        run: |
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+
+      - name: create / list / verify / extract must round trip exactly
+        run: |
+          set -e
+          for opts in "" "--compress" "--compress --level=19" "--compress --dict=16384" "--no-hashes"; do
+            echo "=== options: ${opts:-none} ==="
+            ./build/uvfs create round.uvfs $opts --strip=$PWD $PWD/src $PWD/include
+            ./build/uvfs list round.uvfs | tail -1
+            ./build/uvfs verify round.uvfs
+            rm -rf out && ./build/uvfs extract round.uvfs out
+            diff -r src out/src
+            diff -r include out/include
+            rm -f round.uvfs
+          done
+
+      - name: A damaged archive must be reported, not served
+        run: |
+          ./build/uvfs create dmg.uvfs --compress $PWD/README.md
+          # Flip a bit in the payload region, past the header and index.
+          size=$(stat -c %s dmg.uvfs)
+          printf '\xff' | dd of=dmg.uvfs bs=1 seek=$((size - 16)) count=1 conv=notrunc status=none
+          if ./build/uvfs verify dmg.uvfs; then
+            echo "verify accepted a damaged archive"
+            exit 1
+          fi
+          echo "damage reported as expected"
