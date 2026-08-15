@@ -5,6 +5,9 @@
 
 #include <sys/stat.h>
 
+#include <random>
+#include <vector>
+
 using namespace uvfs::test;
 
 // R5: a file removed between add_file() and commit() used to throw inside a
@@ -245,3 +248,102 @@ UVFS_TEST("writer/many_threads_many_files")
               static_cast<std::size_t>(i % 13) * 100, static_cast<uint64_t>(i + 1)));
   }
 }
+
+#if defined(UVFS_HAS_ZSTD)
+UVFS_TEST("writer/large_unreadable_input_is_reported_like_any_other")
+{
+  // Payloads bigger than the staging batch take a separate streaming path, and
+  // that path opened the source file outside any try/catch. A permission error
+  // there escaped as a bare runtime_error instead of commit_error, so the
+  // caller lost the per-file list, and the blanket "append the output path"
+  // handler made the message name the archive rather than the input at fault.
+  scratch_dir dir{"bigunreadable"};
+  const auto arc = dir / "out.uvfs";
+
+  // Larger than compression_batch_bytes (64 MiB) so it streams.
+  const std::size_t big = 70u * 1024 * 1024;
+  std::string text;
+  text.reserve(big);
+  while (text.size() < big)
+    text += "streaming compressible payload for the permission test. ";
+  text.resize(big);
+  const auto secret = dir.make_text("secret.bin", text);
+  const auto ok = dir.make_text("fine.bin", "hello");
+  std::filesystem::permissions(secret, std::filesystem::perms::none);
+
+  if (::access(secret.c_str(), R_OK) == 0)
+  {
+    std::printf("    (running as root, permission check not meaningful)\n");
+    return;
+  }
+
+  uvfs::writer w;
+  uvfs::compression_settings cs;
+  cs.method = uvfs::compression::always;
+  w.set_compression(cs);
+  w.add_file("/fine", ok);
+  w.add_file("/secret", secret);
+
+  bool got_commit_error = false;
+  std::string message;
+  std::vector<uvfs::skipped_file> files;
+  try
+  {
+    w.commit(arc);
+  }
+  catch (const uvfs::commit_error& e)
+  {
+    got_commit_error = true;
+    message = e.what();
+    files = e.files;
+  }
+  catch (const std::exception& e)
+  {
+    message = e.what();
+  }
+
+  // It must arrive as commit_error, carrying which input failed.
+  CHECK(got_commit_error);
+  CHECK(!files.empty());
+  if (!files.empty())
+    CHECK(files.front().path_in_archive == "/secret");
+  // ...and the message must name the input, not the archive being written.
+  CHECK(message.find("secret.bin") != std::string::npos);
+  CHECK(!std::filesystem::exists(arc));
+}
+
+UVFS_TEST("writer/large_input_that_vanishes_is_reported")
+{
+  scratch_dir dir{"bigvanish"};
+  const auto arc = dir / "out.uvfs";
+  const std::size_t big = 70u * 1024 * 1024;
+  std::string blob;
+  blob.reserve(big);
+  std::mt19937_64 rng{4};
+  while (blob.size() < big)
+    blob.push_back(static_cast<char>(rng() & 0xff)); // incompressible
+  const auto gone = dir.make_text("gone.bin", blob);
+
+  uvfs::writer w;
+  uvfs::compression_settings cs;
+  cs.method = uvfs::compression::automatic;
+  w.set_compression(cs);
+  w.add_file("/gone", gone);
+  std::filesystem::remove(gone);
+
+  bool got_commit_error = false;
+  try
+  {
+    w.commit(arc);
+  }
+  catch (const uvfs::commit_error&)
+  {
+    got_commit_error = true;
+  }
+  catch (const std::exception&)
+  {
+  }
+  CHECK(got_commit_error);
+  CHECK(!std::filesystem::exists(arc));
+}
+#endif

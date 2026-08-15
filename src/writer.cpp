@@ -455,11 +455,28 @@ auto place_compressed(
         // Aligning as if compressed; if it falls back to store the offset is
         // still 64-byte aligned because compressed alignment divides it.
         const int64_t at = round_up(offset, payload_alignment);
-        reserve_through(at + p.size);
         std::string error;
-        written = stream_compress_into(
-            p.src->path_in_system, p.size, payloads + at, p.size, cs, cdict.get(),
-            error);
+        try
+        {
+          reserve_through(at + p.size);
+          written = stream_compress_into(
+              p.src->path_in_system, p.size, payloads + at, p.size, cs,
+              cdict.get(), error);
+        }
+        catch (const out_of_space&)
+        {
+          throw; // about the archive, not about this input
+        }
+        catch (const std::exception& ex)
+        {
+          // stream_compress_into opens the source itself, so an unreadable or
+          // vanished input surfaces here rather than through read_file. Left
+          // unhandled it escaped as a bare runtime_error, losing the per-file
+          // list the caller needs.
+          on_error(p, ex.what());
+          i++;
+          continue;
+        }
         if (written >= 0 && worth_keeping(written, p.size, cs))
         {
           p.data_offset = at;
@@ -1149,6 +1166,8 @@ void writer::commit(std::string_view path)
   }
   catch (const std::runtime_error& e)
   {
+    // Messages here end in ": " by convention and are about the output, which
+    // is the only thing left that can fail once per-input errors are collected.
     throw std::runtime_error(std::string(e.what()).append(out));
   }
   // Every other exception type propagates unchanged, and the guard still runs.

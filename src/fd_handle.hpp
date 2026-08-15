@@ -14,6 +14,15 @@
 namespace uvfs
 {
 
+//! Thrown when the destination filesystem is out of space. Distinct from an
+//! ordinary runtime_error because it is a property of the archive being
+//! written, not of any one input, and must not be collected as a per-file
+//! failure that the commit could otherwise skip past.
+struct out_of_space : std::runtime_error
+{
+  using std::runtime_error::runtime_error;
+};
+
 [[nodiscard]] inline auto errno_string(int e) -> std::string
 {
   char buf[256] = {};
@@ -121,7 +130,7 @@ public:
     if (rc == 0)
       return true;
     if (rc == ENOSPC || rc == EDQUOT)
-      throw std::runtime_error(
+      throw out_of_space(
           "uvfs: not enough space for the archive (" + errno_string(rc) + "): ");
     return false; // EOPNOTSUPP and friends: no guarantee available here
 #else
