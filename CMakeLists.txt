@@ -198,6 +198,8 @@ if(UVFS_BUILD_FUZZERS)
   add_executable(uvfs_fuzz_reader tests/fuzz_reader.cpp)
   target_link_libraries(uvfs_fuzz_reader
     PRIVATE uvfs_reader $<BUILD_INTERFACE:uvfs_build_settings>)
+  # The target uses the platform layer for a portable process id.
+  target_include_directories(uvfs_fuzz_reader PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_compile_options(uvfs_fuzz_reader PRIVATE -fsanitize=fuzzer)
   target_link_options(uvfs_fuzz_reader PRIVATE -fsanitize=fuzzer)
 endif()
