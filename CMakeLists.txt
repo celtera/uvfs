@@ -143,6 +143,7 @@ if(UVFS_BUILD_TESTS)
     tests/test_oom.cpp
     tests/test_cleanup.cpp
     tests/test_enospc.cpp
+    tests/test_api.cpp
   )
   target_link_libraries(uvfs_tests
     PRIVATE uvfs_reader uvfs_writer $<BUILD_INTERFACE:uvfs_build_settings>)

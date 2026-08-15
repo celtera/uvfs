@@ -270,19 +270,25 @@ reader::~reader() = default;
 reader::reader(reader&&) noexcept = default;
 auto reader::operator=(reader&&) noexcept -> reader& = default;
 
+// A moved-from reader has a null pimpl. The standard contract for a moved-from
+// object is "valid but unspecified", and valid means member functions can still
+// be called -- so every entry point below treats that state as an empty
+// archive rather than dereferencing null. The branch is perfectly predicted and
+// does not show up in lookup timings.
+
 auto reader::size() const noexcept -> std::size_t
 {
-  return static_cast<std::size_t>(impl->h.file_count);
+  return impl ? static_cast<std::size_t>(impl->h.file_count) : 0u;
 }
 
 auto reader::count() const noexcept -> int64_t
 {
-  return impl->h.file_count;
+  return impl ? impl->h.file_count : 0;
 }
 
 auto reader::has_content_hashes() const noexcept -> bool
 {
-  return impl->hashes != nullptr;
+  return impl && impl->hashes != nullptr;
 }
 
 namespace
@@ -299,7 +305,7 @@ auto to_info(std::string_view name, const entry& e) noexcept -> file_info
 
 auto reader::at(int64_t i) const -> file_info
 {
-  if (i < 0 || i >= impl->h.file_count)
+  if (!impl || i < 0 || i >= impl->h.file_count)
     throw std::out_of_range(
         "uvfs: entry index " + std::to_string(i) + " is out of range");
   const entry e = impl->checked_entry_at(i);
@@ -308,6 +314,8 @@ auto reader::at(int64_t i) const -> file_info
 
 auto reader::stat(std::string_view path) const noexcept -> std::optional<file_info>
 {
+  if (!impl)
+    return std::nullopt;
   const auto i = impl->lookup(path);
   if (i < 0)
     return std::nullopt;
@@ -317,6 +325,8 @@ auto reader::stat(std::string_view path) const noexcept -> std::optional<file_in
 
 auto reader::find(std::string_view path) const -> std::optional<byte_array>
 {
+  if (!impl)
+    return std::nullopt;
   const auto i = impl->lookup(path);
   if (i < 0)
     return std::nullopt;
@@ -330,6 +340,8 @@ auto reader::find(std::string_view path) const -> std::optional<byte_array>
 
 void reader::for_each_file(function_ref<bool(iter_entry)> func) const
 {
+  if (!impl)
+    return;
   const int64_t n = impl->h.file_count;
   for (int64_t i = 0; i < n; i++)
   {
@@ -350,6 +362,8 @@ void reader::for_each_file(function_ref<bool(iter_entry)> func) const
 auto reader::read_into(std::string_view path, char* out, int64_t capacity) const
     -> std::optional<int64_t>
 {
+  if (!impl)
+    return std::nullopt;
   const auto i = impl->lookup(path);
   if (i < 0)
     return std::nullopt;
@@ -389,6 +403,8 @@ auto reader::read_into(std::string_view path, char* out, int64_t capacity) const
 
 auto reader::read(std::string_view path) const -> std::optional<std::vector<char>>
 {
+  if (!impl)
+    return std::nullopt;
   const auto i = impl->lookup(path);
   if (i < 0)
     return std::nullopt;
@@ -408,7 +424,7 @@ auto reader::read(std::string_view path) const -> std::optional<std::vector<char
 auto reader::verify() const -> std::vector<std::string>
 {
   std::vector<std::string> bad;
-  if (!impl->hashes)
+  if (!impl || !impl->hashes)
     return bad;
 
   const int64_t n = impl->h.file_count;

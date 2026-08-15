@@ -59,6 +59,8 @@ public:
   explicit reader(std::string_view path, integrity check = integrity::header_only);
   reader(const reader&) = delete;
   auto operator=(const reader&) -> reader& = delete;
+  //! Moving leaves the source behaving as an empty archive: every method may
+  //! still be called on it, and reports nothing rather than misbehaving.
   reader(reader&&) noexcept;
   auto operator=(reader&&) noexcept -> reader&;
   ~reader();
