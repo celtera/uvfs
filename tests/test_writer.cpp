@@ -1,4 +1,5 @@
 #include "framework.hpp"
+#include "platform.hpp"
 
 #include <sys/stat.h>
 #include <uvfs/reader.hpp>
@@ -76,7 +77,7 @@ UVFS_TEST("writer/unreadable_file_is_reported_not_fatal")
 
   // Running as root defeats permission checks entirely; skip rather than
   // report a false failure.
-  if (::access(secret.c_str(), R_OK) == 0)
+  if (uvfs::platform::readable(secret.c_str()))
   {
     std::printf("    (running as root, permission check not meaningful)\n");
     return;
@@ -270,7 +271,7 @@ UVFS_TEST("writer/large_unreadable_input_is_reported_like_any_other")
   const auto ok = dir.make_text("fine.bin", "hello");
   std::filesystem::permissions(secret, std::filesystem::perms::none);
 
-  if (::access(secret.c_str(), R_OK) == 0)
+  if (uvfs::platform::readable(secret.c_str()))
   {
     std::printf("    (running as root, permission check not meaningful)\n");
     return;
