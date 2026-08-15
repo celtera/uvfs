@@ -244,18 +244,21 @@ auto cmd_extract(const std::string& archive, const std::string& outdir) -> int
     const fs::path target = fs::path{outdir} / rel;
     fs::create_directories(target.parent_path());
 
-    buf.resize(static_cast<std::size_t>(e.size));
-    const auto n = r.read_into(e.path, buf.data(), std::ssize(buf));
-    if (!n)
+    // read() validates the size against the frame before allocating; sizing
+    // buf from e.size here would reintroduce the unbounded allocation.
+    auto payload = r.read(e.path);
+    if (!payload)
       continue;
+    buf = std::move(*payload);
+    const int64_t n = std::ssize(buf);
     FILE* f = std::fopen(target.c_str(), "wb");
     if (!f)
     {
       std::fprintf(stderr, "uvfs: could not write %s\n", target.c_str());
       return 1;
     }
-    if (*n > 0)
-      std::fwrite(buf.data(), 1, static_cast<std::size_t>(*n), f);
+    if (n > 0)
+      std::fwrite(buf.data(), 1, static_cast<std::size_t>(n), f);
     std::fclose(f);
     written++;
   }

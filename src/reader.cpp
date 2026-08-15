@@ -73,9 +73,17 @@ struct reader::impl
         // A stored payload is the file, so the two sizes must agree.
         return e.orig_size == e.stored_size;
       case codec::zstd:
-        return true;
       case codec::zstd_dict:
-        return h.has(flag_has_dictionary);
+      {
+        if (e.method == codec::zstd_dict && !h.has(flag_has_dictionary))
+          return false;
+        // Nothing can come out of nothing, and a payload cannot expand beyond
+        // what a valid zstd frame is able to encode. Division rather than
+        // multiplication: stored_size can be large enough to overflow.
+        if (e.stored_size == 0)
+          return e.orig_size == 0;
+        return e.orig_size / max_zstd_expansion <= e.stored_size;
+      }
     }
     return false; // unknown codec
   }
@@ -99,6 +107,35 @@ struct reader::impl
       throw std::runtime_error(
           "uvfs: content checksum mismatch for " + std::string{name}
           + ", the payload is damaged");
+  }
+
+  //! Cross-checks the index's idea of an entry's size against the size the
+  //! zstd frame itself declares, before anything is sized from it.
+  //!
+  //! The ratio bound in sane() is deliberately loose -- it has to admit every
+  //! frame zstd can produce -- so on its own it still lets a corrupt index
+  //! claim tens of gigabytes for a payload of a few megabytes. The frame
+  //! header settles it exactly, and reading it is a handful of bytes.
+  void check_declared_size(const entry& e, std::string_view name) const
+  {
+    if (e.method == codec::store)
+      return;
+#if defined(UVFS_HAS_ZSTD)
+    const auto declared = ZSTD_getFrameContentSize(
+        payloads + e.data_offset, static_cast<std::size_t>(e.stored_size));
+    if (declared == ZSTD_CONTENTSIZE_ERROR)
+      throw std::runtime_error(
+          "uvfs: " + std::string{name} + " is not a valid compressed frame");
+    if (declared == ZSTD_CONTENTSIZE_UNKNOWN)
+      return; // nothing to cross-check against; the ratio bound still applies
+    if (static_cast<int64_t>(declared) != e.orig_size)
+      throw std::runtime_error(
+          "uvfs: index says " + std::string{name} + " is "
+          + std::to_string(e.orig_size) + " bytes but its frame declares "
+          + std::to_string(declared) + " (corrupt index)");
+#else
+    (void)name;
+#endif
   }
 
   [[nodiscard]] auto checked_entry_at(int64_t i) const -> entry
@@ -317,6 +354,7 @@ auto reader::read_into(std::string_view path, char* out, int64_t capacity) const
   if (i < 0)
     return std::nullopt;
   const entry e = impl->checked_entry_at(i);
+  impl->check_declared_size(e, path);
   impl->verify_payload(i, e, path);
   if (capacity < e.orig_size)
     throw std::runtime_error(
@@ -351,10 +389,16 @@ auto reader::read_into(std::string_view path, char* out, int64_t capacity) const
 
 auto reader::read(std::string_view path) const -> std::optional<std::vector<char>>
 {
-  const auto info = stat(path);
-  if (!info)
+  const auto i = impl->lookup(path);
+  if (i < 0)
     return std::nullopt;
-  std::vector<char> out(static_cast<std::size_t>(info->size));
+  const entry e = impl->checked_entry_at(i);
+  // Validate the size before it is used to allocate, not after: sizing a
+  // buffer straight from a corrupt index field is how a damaged archive turns
+  // into an out-of-memory kill.
+  impl->check_declared_size(e, path);
+
+  std::vector<char> out(static_cast<std::size_t>(e.orig_size));
   const auto n = read_into(path, out.data(), static_cast<int64_t>(out.size()));
   if (!n)
     return std::nullopt;

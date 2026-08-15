@@ -364,3 +364,111 @@ UVFS_TEST("integrity/dictionary_damage_is_detected")
   CHECK_EQ(silently_wrong, 0);
 }
 #endif
+
+#if defined(UVFS_HAS_ZSTD)
+UVFS_TEST("integrity/corrupt_orig_size_does_not_drive_a_huge_allocation")
+{
+  // sane() constrains orig_size only for codec::store. For a compressed entry
+  // it was unchecked, so read() sized a vector straight from a corrupt index
+  // field. On Linux with overcommit a request of a few hundred GB can succeed
+  // and get the process OOM-killed rather than throwing.
+  scratch_dir dir{"origsize"};
+  const auto arc = dir / "out.uvfs";
+  std::string text;
+  while (text.size() < 40000)
+    text += "compressible padding for the corrupt size test. ";
+
+  uvfs::writer w;
+  uvfs::compression_settings cs;
+  cs.method = uvfs::compression::always;
+  w.set_compression(cs);
+  w.add_file("/a", dir.make_text("a", text));
+  w.commit(arc);
+
+  const auto pristine = slurp(arc);
+  const auto e0 = entry_offset(pristine, 0);
+  CHECK(uvfs::load<uint8_t>(pristine.data() + e0 + ent::method) != 0);
+
+  // Sizes far beyond anything the stored bytes could possibly expand to.
+  const int64_t absurd[] = {
+      int64_t{1} << 62, int64_t{1} << 48, int64_t{1} << 40,
+      0x29000000000300e8LL, std::numeric_limits<int64_t>::max()};
+
+  for (auto v : absurd)
+  {
+    auto bytes = pristine;
+    std::memcpy(bytes.data() + e0 + ent::orig_size, &v, sizeof v);
+    const auto bad = dir / "bad.uvfs";
+    spit(bad, bytes);
+
+    uvfs::reader r{bad, uvfs::integrity::header_only};
+    // The entry must be rejected outright, not turned into an allocation the
+    // size of the claim. A std::bad_alloc here means the check is missing.
+    bool sane_failure = false;
+    try
+    {
+      auto got = r.read("/a");
+      // Reaching here at all is only acceptable if nothing was allocated.
+      sane_failure = !got.has_value();
+    }
+    catch (const std::bad_alloc&)
+    {
+      sane_failure = false; // allocation was attempted: the bug
+    }
+    catch (const std::exception&)
+    {
+      sane_failure = true; // refused, which is correct
+    }
+    CHECK(sane_failure);
+
+    // The entry must also not be reachable through iteration.
+    bool iterated_cleanly = true;
+    try
+    {
+      for (int64_t i = 0; i < r.count(); i++)
+        (void)r.at(i);
+    }
+    catch (const std::bad_alloc&)
+    {
+      iterated_cleanly = false;
+    }
+    catch (const std::exception&)
+    {
+      iterated_cleanly = true;
+    }
+    CHECK(iterated_cleanly);
+  }
+}
+
+UVFS_TEST("integrity/legitimate_high_ratio_payload_still_reads")
+{
+  // The bound must not reject a genuinely well-compressing payload. A run of
+  // identical bytes is close to zstd's best case, so if any real input trips
+  // the ratio check it is this one.
+  scratch_dir dir{"highratio"};
+  const auto arc = dir / "out.uvfs";
+  const std::string zeros(8u * 1024 * 1024, '\0');
+
+  uvfs::writer w;
+  uvfs::compression_settings cs;
+  cs.method = uvfs::compression::always;
+  cs.level = 19;
+  w.set_compression(cs);
+  w.add_file("/zeros", dir.make_text("z", zeros));
+  w.commit(arc);
+
+  uvfs::reader r{arc};
+  const auto info = r.stat("/zeros");
+  CHECK(info.has_value());
+  if (info)
+    std::printf(
+        "    (%lld bytes stored as %lld: ratio %.0f:1)\n",
+        static_cast<long long>(info->size),
+        static_cast<long long>(info->stored_size),
+        static_cast<double>(info->size) / static_cast<double>(info->stored_size));
+  auto got = r.read("/zeros");
+  CHECK(got.has_value());
+  if (got)
+    CHECK(std::string(got->begin(), got->end()) == zeros);
+}
+#endif

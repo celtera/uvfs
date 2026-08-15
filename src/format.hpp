@@ -57,6 +57,17 @@ static constexpr int64_t max_file_count = (int64_t{1} << 31) - 2;
 //! Empty hash table slot.
 static constexpr uint64_t empty_slot = ~uint64_t{0};
 
+//! Loosest ratio a valid zstd frame can achieve, used to reject an index that
+//! claims a payload expands to something the stored bytes could not encode.
+//!
+//! zstd's densest encoding is a run-length block: 3 bytes of block header for
+//! up to ZSTD_BLOCKSIZE_MAX (128 KiB) of output, so the asymptotic ceiling is
+//! 131072/3 = 43690.7 to one. Rounding up to 50000 keeps every real frame
+//! comfortably inside the bound -- a measured best case, 8 MiB of zeros at
+//! level 19, reaches 30728:1 -- while still rejecting the absurd values that
+//! corruption produces.
+static constexpr int64_t max_zstd_expansion = 50000;
+
 enum class codec : uint8_t
 {
   store = 0,    //!< payload is the file, byte for byte
