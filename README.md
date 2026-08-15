@@ -245,7 +245,8 @@ Compression is CPU-bound and uses every thread available.
 ## Limits
 
 - 2³¹−2 files per archive.
-- 65535 bytes per path, 4 GB of names in total.
+- 65535 bytes per path, and 4 GiB of archive paths in total (a 32-bit offset
+  per entry into one name blob). Both are enforced at write time.
 - POSIX only. `mmap`, `pread`, `copy_file_range`; no Windows backend yet.
 - Little-endian only, checked at compile time.
 - No metadata: no mode, mtime, ownership, symlinks or directories.

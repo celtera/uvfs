@@ -886,6 +886,17 @@ void writer::commit(std::string_view path)
     worst_case_data = round_up(worst_case_data, payload_alignment) + p.size;
   }
 
+  // Every entry locates its name by a 32-bit offset into one blob. Past 4 GiB
+  // of names those offsets silently wrap, and the archive that comes out is
+  // structurally valid, passes its own index hash, and hands back other
+  // entries' names -- with commit() reporting success. Refusing is the only
+  // honest option, since the field cannot address the data.
+  if (names_size > max_names_size)
+    throw std::invalid_argument(
+        "uvfs: archive paths total " + std::to_string(names_size)
+        + " bytes, over the format's limit of " + std::to_string(max_names_size)
+        + "; use shorter names or split the archive");
+
   h.file_count = n;
   h.table_capacity = table_capacity_for(n);
   h.names_size = names_size;

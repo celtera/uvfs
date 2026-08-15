@@ -5,6 +5,8 @@
 #include <uvfs/writer.hpp>
 
 #include <fstream>
+#include <cstdlib>
+#include <limits>
 
 using namespace uvfs::test;
 
@@ -192,4 +194,63 @@ UVFS_TEST("path/writer_is_the_thing_that_prevents_duplicates")
   // Sorted order is part of the format now.
   CHECK(r.at(0).path == "/aa");
   CHECK(r.at(1).path == "/bb");
+}
+
+UVFS_TEST("path/name_blob_limit_is_a_stated_constant")
+{
+  // entry::name_offset is a uint32_t, so the name blob cannot exceed 4 GiB.
+  // The value is checked here so that widening the field without revisiting
+  // the writer's guard cannot pass unnoticed.
+  CHECK_EQ(uvfs::max_names_size, int64_t{0xffffffff});
+  CHECK(uvfs::max_names_size <= int64_t{std::numeric_limits<uint32_t>::max()});
+}
+
+UVFS_TEST("path/oversized_name_blob_is_refused")
+{
+  // Reproducing this for real needs more than 4 GiB of archive paths held in
+  // memory at once, so it is opt-in: UVFS_SLOW_TESTS=1. Without the guard the
+  // writer truncates name offsets to 32 bits and reports success, producing an
+  // archive whose entries carry other entries' names and cannot be found by
+  // the names they were given.
+  const char* slow = std::getenv("UVFS_SLOW_TESTS");
+  if (!slow || std::string{slow} != "1")
+  {
+    std::printf("    (set UVFS_SLOW_TESTS=1 to run; needs ~9 GB of RAM)\n");
+    return;
+  }
+
+  scratch_dir dir{"nameblob"};
+  const auto src = dir.make_file("payload.bin", 16, 1);
+  const auto arc = dir / "out.uvfs";
+
+  // Each path is the largest the format allows, all well inside the per-file
+  // count limit; only their total exceeds what a 32-bit offset can address.
+  const std::size_t path_len = static_cast<std::size_t>(uvfs::max_archive_path_size);
+  const int count = static_cast<int>(0xffffffffULL / path_len) + 4;
+
+  uvfs::writer w;
+  for (int i = 0; i < count; i++)
+  {
+    std::string name = "/" + std::to_string(i);
+    name.append(path_len - name.size(), 'a');
+    w.add_file(name, src);
+  }
+  std::printf(
+      "    (%d paths of %zu bytes = %.2f GiB of names)\n", count, path_len,
+      static_cast<double>(count) * static_cast<double>(path_len) / (1024.0 * 1024 * 1024));
+
+  bool refused = false;
+  std::string message;
+  try
+  {
+    w.commit(arc);
+  }
+  catch (const std::exception& e)
+  {
+    refused = true;
+    message = e.what();
+  }
+  CHECK(refused);
+  CHECK(message.find("name") != std::string::npos);
+  CHECK(!std::filesystem::exists(arc));
 }

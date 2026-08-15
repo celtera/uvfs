@@ -21,6 +21,14 @@ namespace uvfs
 //! Largest archive path uvfs will store, in bytes.
 inline constexpr int64_t max_archive_path_size = 65535;
 
+//! Largest total size of all archive paths in one archive.
+//!
+//! Every entry locates its name by a 32-bit offset into a single blob, so the
+//! blob cannot exceed what that offset can address. Reaching this needs an
+//! extreme corpus -- roughly 43 million files at 100-byte paths -- but it is a
+//! real limit and the writer enforces it rather than truncating.
+inline constexpr int64_t max_names_size = 0xffffffff;
+
 enum class path_problem
 {
   ok,
