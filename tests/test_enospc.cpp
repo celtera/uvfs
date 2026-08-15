@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 using namespace uvfs::test;
 
@@ -51,6 +52,16 @@ auto commit_into_small_fs(const char* mode, int fs_mb, int count, int kb)
   return r;
 }
 
+//! "always" only means anything where the build can actually compress.
+auto compression_modes() -> std::vector<const char*>
+{
+#if defined(UVFS_HAS_ZSTD)
+  return {"none", "always"};
+#else
+  return {"none"};
+#endif
+}
+
 auto namespaces_available() -> bool
 {
   const auto r = commit_into_small_fs("none", 64, 1, 1);
@@ -71,8 +82,7 @@ UVFS_TEST("enospc/running_out_of_space_is_an_error_not_a_crash")
   // no way to report a full filesystem: the store fails at page-fault time and
   // the process gets SIGBUS. Blocks have to be reserved before they are
   // written through.
-  const char* modes[] = {"none", "always"};
-  for (auto* mode : modes)
+  for (auto* mode : compression_modes())
   {
     const auto r = commit_into_small_fs(mode, 4, 2000, 20);
     std::printf(
@@ -101,7 +111,7 @@ UVFS_TEST("enospc/an_archive_that_fits_still_commits")
   }
   // Same filesystem size, comfortably enough room: reserving space must not
   // turn a workable commit into a failure.
-  for (auto* mode : {"none", "always"})
+  for (auto* mode : compression_modes())
   {
     const auto r = commit_into_small_fs(mode, 64, 200, 20);
     std::printf("    %-7s exit=%d %s", mode, r.exit_code, r.output.c_str());

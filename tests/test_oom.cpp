@@ -7,6 +7,8 @@
 
 using namespace uvfs::test;
 
+#if defined(UVFS_HAS_ZSTD)
+
 namespace
 {
 struct run_result
@@ -52,7 +54,6 @@ auto run_under_limit(
 }
 } // namespace
 
-#if defined(UVFS_HAS_ZSTD)
 UVFS_TEST("oom/compression_worker_never_terminates")
 {
   // A worker thread that lets an exception escape calls std::terminate, and

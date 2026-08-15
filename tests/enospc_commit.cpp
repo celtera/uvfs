@@ -43,17 +43,19 @@ auto main(int argc, char** argv) -> int
   }
 
   uvfs::writer w;
-  if (mode == "always")
-  {
-    uvfs::compression_settings cs;
-    cs.method = uvfs::compression::always;
-    w.set_compression(cs);
-  }
-  for (int i = 0; i < count; i++)
-    w.add_file("/f" + std::to_string(i), paths[static_cast<std::size_t>(i)]);
-
   try
   {
+    // Inside the handler: a build without zstd refuses compression here, and
+    // letting that escape main() would look like a crash to the caller.
+    if (mode == "always")
+    {
+      uvfs::compression_settings cs;
+      cs.method = uvfs::compression::always;
+      w.set_compression(cs);
+    }
+    for (int i = 0; i < count; i++)
+      w.add_file("/f" + std::to_string(i), paths[static_cast<std::size_t>(i)]);
+
     w.commit(outdir + "/out.uvfs");
     std::printf("committed\n");
     return 0;
