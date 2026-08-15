@@ -140,6 +140,7 @@ if(UVFS_BUILD_TESTS)
     tests/test_integrity.cpp
     tests/test_compression.cpp
     tests/test_dedup.cpp
+    tests/test_oom.cpp
   )
   target_link_libraries(uvfs_tests
     PRIVATE uvfs_reader uvfs_writer $<BUILD_INTERFACE:uvfs_build_settings>)
@@ -153,6 +154,15 @@ if(UVFS_BUILD_TESTS)
     ${CMAKE_CURRENT_SOURCE_DIR}/tests
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_include_directories(uvfs_tests SYSTEM PRIVATE ${UVFS_XXHASH_INC})
+  # Runs one commit under an RLIMIT_AS cap in its own process, so that a
+  # std::terminate inside a worker is observable instead of fatal to the suite.
+  add_executable(uvfs_oom_commit tests/oom_commit.cpp)
+  target_link_libraries(uvfs_oom_commit
+    PRIVATE uvfs_writer $<BUILD_INTERFACE:uvfs_build_settings>)
+  add_dependencies(uvfs_tests uvfs_oom_commit)
+  target_compile_definitions(uvfs_tests PRIVATE
+    UVFS_OOM_HELPER="$<TARGET_FILE:uvfs_oom_commit>")
+
   add_test(NAME uvfs_tests COMMAND uvfs_tests)
 endif()
 

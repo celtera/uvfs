@@ -507,6 +507,12 @@ auto place_compressed(
             return;
           }
 
+          // Everything below runs on a worker thread, where an escaping
+          // exception means std::terminate. The staging and compression
+          // buffers are the size of the payload, so std::bad_alloc here is not
+          // hypothetical: it is what a large batch under memory pressure does.
+          try
+          {
           std::vector<char> raw;
           std::string error;
           if (!read_file(p.src->path_in_system, p.size, raw, error))
@@ -549,6 +555,15 @@ auto place_compressed(
           }
           slot = std::move(raw);
           p.method = codec::store;
+          }
+          catch (const std::exception& ex)
+          {
+            on_error(p, ex.what());
+          }
+          catch (...)
+          {
+            on_error(p, "unknown error while compressing");
+          }
         });
 
     // Offsets in sorted order, so the layout does not depend on which thread
@@ -573,13 +588,25 @@ auto place_compressed(
           auto& p = plan[static_cast<std::size_t>(i + k)];
           if (p.shares_with >= 0)
             return;
-          auto& slot = staging[static_cast<std::size_t>(k)];
-          char* const dst = payloads + p.data_offset;
-          if (!slot.empty())
-            memcpy(dst, slot.data(), slot.size());
-          if (want_hashes)
-            p.content_hash = hash_bytes(dst, static_cast<std::size_t>(p.stored_size));
-          std::vector<char>{}.swap(slot); // release the batch as we go
+          try
+          {
+            auto& slot = staging[static_cast<std::size_t>(k)];
+            char* const dst = payloads + p.data_offset;
+            if (!slot.empty())
+              memcpy(dst, slot.data(), slot.size());
+            if (want_hashes)
+              p.content_hash
+                  = hash_bytes(dst, static_cast<std::size_t>(p.stored_size));
+            std::vector<char>{}.swap(slot); // release the batch as we go
+          }
+          catch (const std::exception& ex)
+          {
+            on_error(p, ex.what());
+          }
+          catch (...)
+          {
+            on_error(p, "unknown error while writing a payload");
+          }
         });
 
     i = j;
@@ -866,6 +893,7 @@ void writer::commit(std::string_view path)
 
   std::vector<skipped_file> copy_errors;
   std::mutex errors_mutex;
+  std::atomic<bool> had_error{false};
   try
   {
     auto handle = fd_handle::create_rw(tmp.c_str(), 0644);
@@ -881,10 +909,22 @@ void writer::commit(std::string_view path)
       if (!dictionary.empty())
         memcpy(data.bytes + h.dict_start, dictionary.data(), dictionary.size());
 
-      const auto record_error = [&](const placed& p, const std::string& why)
+      // Called from worker threads, so it must not throw: an exception here
+      // would escape the very handler that exists to stop exceptions escaping.
+      // If even recording the detail fails, the flag still fails the commit.
+      const auto record_error
+          = [&](const placed& p, const std::string& why) noexcept
       {
-        const std::lock_guard lock{errors_mutex};
-        copy_errors.push_back({p.src->path_in_archive, p.src->path_in_system, why});
+        had_error.store(true, std::memory_order_relaxed);
+        try
+        {
+          const std::lock_guard lock{errors_mutex};
+          copy_errors.push_back(
+              {p.src->path_in_archive, p.src->path_in_system, why});
+        }
+        catch (...)
+        {
+        }
       };
 
       const int dst_fd = handle.get();
@@ -953,7 +993,7 @@ void writer::commit(std::string_view path)
             impl->compress, impl->content_hashes, impl->threads, record_error);
       }
 
-      if (copy_errors.empty())
+      if (!had_error.load(std::memory_order_relaxed) && copy_errors.empty())
       {
         // Entries sharing a payload adopt the placement of the entry that
         // actually wrote the bytes. A batch never precedes its own primary,
@@ -1038,8 +1078,10 @@ void writer::commit(std::string_view path)
       }
     } // unmap
 
-    if (!copy_errors.empty())
+    if (had_error.load(std::memory_order_relaxed) || !copy_errors.empty())
     {
+      if (copy_errors.empty())
+        copy_errors.push_back({"", "", "out of memory while building the archive"});
       handle.close_now();
       unlink_quietly(tmp);
       auto msg = "uvfs: " + std::to_string(copy_errors.size())
