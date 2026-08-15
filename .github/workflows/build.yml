@@ -38,7 +38,9 @@ jobs:
           - { name: "Ubuntu arm64 gcc", os: ubuntu-24.04-arm, cxx: g++ }
           - { name: "Ubuntu arm64 clang", os: ubuntu-24.04-arm, cxx: clang++ }
           - { name: "macOS arm64", os: macos-latest, cxx: clang++ }
-          - { name: "macOS x86_64", os: macos-13, cxx: clang++ }
+          # macos-13 is retired, so jobs targeting it queue forever rather
+          # than failing. macos-15-intel is the current x86_64 image.
+          - { name: "macOS x86_64", os: macos-15-intel, cxx: clang++ }
 
     steps:
       - uses: actions/checkout@v4
