@@ -1,0 +1,92 @@
+name: BSDs
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - v*
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# The BSDs are the platforms most likely to notice a Linux assumption that
+# slipped in: they have their own libc, their own strerror_r, no /proc by
+# default, and no copy_file_range or posix_fallocate on the paths uvfs takes.
+jobs:
+  freebsd:
+    name: FreeBSD
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          sync: nfs
+          copyback: false
+          prepare: |
+            pkg update -f -q
+            pkg install -y cmake ninja git zstd
+          run: |
+            set -x
+            freebsd-version
+            c++ --version
+            cmake --version
+            cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Debug
+            cmake --build build --parallel
+            ./build/uvfs_tests
+
+  openbsd:
+    name: OpenBSD
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: vmactions/openbsd-vm@v1
+        with:
+          usesh: true
+          copyback: false
+          prepare: |
+            pkg_add cmake ninja git zstd
+          run: |
+            set -x
+            uname -a
+            c++ --version
+            cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Debug
+            cmake --build build --parallel
+            ./build/uvfs_tests
+
+  netbsd:
+    name: NetBSD
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: vmactions/netbsd-vm@v1
+        with:
+          usesh: true
+          copyback: false
+          prepare: |
+            /usr/sbin/pkg_add cmake ninja-build git zstd gcc13
+          run: |
+            set -x
+            uname -a
+            cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Debug
+            cmake --build build --parallel
+            ./build/uvfs_tests

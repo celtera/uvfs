@@ -1,0 +1,18 @@
+# Checks are listed explicitly rather than relying on the default set, so that
+# a new clang-tidy release cannot silently change what CI enforces.
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  performance-*,
+  portability-*,
+  misc-*,
+  -bugprone-easily-swappable-parameters,
+  -misc-non-private-member-variables-in-classes,
+  -misc-include-cleaner,
+  -misc-no-recursion,
+  -performance-enum-size
+
+WarningsAsErrors: '*'
+HeaderFilterRegex: '(src|include/uvfs)/'
+FormatStyle: file

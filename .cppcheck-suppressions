@@ -1,0 +1,5 @@
+# cppcheck cannot parse function_ref's member-pointer initialiser and reports
+# the return type as an unknown macro. It is a parser limitation, not a finding.
+unknownMacro:include/uvfs/function_ref.hpp
+# Vendored dependencies are not ours to fix.
+*:3rdparty/*

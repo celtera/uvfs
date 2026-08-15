@@ -1,0 +1,134 @@
+name: Fuzz
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  schedule:
+    # A short run on every change catches regressions; the real work needs
+    # time, so it also runs nightly.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Seconds to fuzz'
+        required: false
+        default: '3600'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  libfuzzer:
+    name: libFuzzer (reader)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build libzstd-dev clang
+
+      - name: Build
+        run: |
+          cmake -S . -B build-fuzz -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DUVFS_BUILD_FUZZERS=ON -DUVFS_SANITIZE=address,undefined \
+            -DUVFS_BUILD_TESTS=OFF
+          cmake --build build-fuzz --parallel
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel --target uvfs
+
+      - name: Seed the corpus with real archives
+        run: |
+          mkdir -p corpus
+          ./build/uvfs create corpus/stored.uvfs README.md CMakeLists.txt
+          ./build/uvfs create corpus/compressed.uvfs --compress src include
+          ./build/uvfs create corpus/dict.uvfs --compress --dict=16384 src include tests
+          ./build/uvfs create corpus/nohash.uvfs --no-hashes README.md
+          ./build/uvfs create corpus/empty.uvfs --skip-unreadable /nonexistent || true
+          ls -l corpus
+
+      - name: Restore the accumulated corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: corpus-cache
+          key: uvfs-fuzz-corpus-${{ github.run_id }}
+          restore-keys: uvfs-fuzz-corpus-
+
+      - name: Fuzz
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          mkdir -p corpus-cache
+          cp -n corpus-cache/* corpus/ 2>/dev/null || true
+          DURATION=${{ github.event.inputs.duration || (github.event_name == 'schedule' && '1800' || '300') }}
+          ./build-fuzz/uvfs_fuzz_reader corpus \
+            -max_total_time=$DURATION \
+            -timeout=25 \
+            -rss_limit_mb=4096 \
+            -print_final_stats=1 \
+            -jobs=$(nproc) -workers=$(nproc) 2>&1 | tail -40
+          # Any crash, timeout or OOM leaves an artifact next to the binary.
+          if ls crash-* timeout-* oom-* leak-* >/dev/null 2>&1; then
+            echo "::error::fuzzing produced a reproducer"
+            for f in crash-* timeout-* oom-* leak-*; do
+              echo "--- $f ---"; xxd "$f" | head -20
+            done
+            exit 1
+          fi
+          cp corpus/* corpus-cache/ 2>/dev/null || true
+
+      - name: Save the corpus for the next run
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: corpus-cache
+          key: uvfs-fuzz-corpus-${{ github.run_id }}
+
+      - name: Upload any reproducer
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-reproducers
+          path: |
+            crash-*
+            timeout-*
+            oom-*
+            leak-*
+          if-no-files-found: ignore
+
+  # A structured sweep over the same surface, so that a machine without clang
+  # still gets corruption coverage, and so failures come with a readable name
+  # rather than a hex blob.
+  mutation:
+    name: Mutation sweep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build libzstd-dev
+      - name: Build
+        run: |
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Debug \
+            -DUVFS_SANITIZE=address,undefined
+          cmake --build build --parallel
+      - name: Run the corruption tests
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          ./build/uvfs_tests format
+          ./build/uvfs_tests integrity

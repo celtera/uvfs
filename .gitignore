@@ -50,3 +50,12 @@ _deps
 *.app
 
 
+
+# build trees
+build*/
+
+# libFuzzer artifacts
+crash-*
+timeout-*
+oom-*
+leak-*

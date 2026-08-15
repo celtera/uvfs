@@ -1,0 +1,396 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - v*
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Host toolchains on the runner images, across every standard the library
+  # claims to support. C++20 is the floor; 23 and 26 are here because a library
+  # that only compiles at its minimum standard is not much use to anyone whose
+  # project has moved on.
+  hosted:
+    name: ${{ matrix.config.name }} C++${{ matrix.std }} ${{ matrix.build_type }}
+    runs-on: ${{ matrix.config.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        std: [20, 23, 26]
+        build_type: [Debug, Release]
+        config:
+          - { name: "Ubuntu x86_64 gcc", os: ubuntu-latest, cxx: g++ }
+          - { name: "Ubuntu x86_64 clang", os: ubuntu-latest, cxx: clang++ }
+          - { name: "Ubuntu arm64 gcc", os: ubuntu-24.04-arm, cxx: g++ }
+          - { name: "Ubuntu arm64 clang", os: ubuntu-24.04-arm, cxx: clang++ }
+          - { name: "macOS arm64", os: macos-latest, cxx: clang++ }
+          # macos-13 is retired, so jobs targeting it queue forever rather
+          # than failing. macos-15-intel is the current x86_64 image.
+          - { name: "macOS x86_64", os: macos-15-intel, cxx: clang++ }
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq ninja-build libzstd-dev
+          else
+            brew install ninja zstd
+          fi
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -GNinja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.config.cxx }} \
+            -DCMAKE_CXX_STANDARD=${{ matrix.std }} \
+            -DCMAKE_INSTALL_PREFIX=$PWD/install \
+            -DCMAKE_CTEST_ARGUMENTS="--output-on-failure"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Install
+        run: cmake --build build --target install
+
+  # Compilers newer or older than the runner images carry. gcc 15 and 16 are
+  # the point of this job: they are where tomorrow's warnings show up.
+  containers:
+    name: ${{ matrix.image }} C++${{ matrix.std }}
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        std: [20, 23, 26]
+        image:
+          - gcc:12
+          - gcc:13
+          - gcc:14
+          - gcc:15
+          - gcc:16
+          - debian:trixie
+          - debian:sid
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq git cmake ninja-build libzstd-dev g++ ca-certificates
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -GNinja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_STANDARD=${{ matrix.std }} \
+            -DCMAKE_CTEST_ARGUMENTS="--output-on-failure"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  # Every clang the LLVM apt repository still publishes, against both standard
+  # libraries. libc++ is not optional coverage: it is what macOS, Android and
+  # the BSDs use, and it is missing features libstdc++ has had for years.
+  clang:
+    name: clang-${{ matrix.version }} ${{ matrix.stdlib }} C++${{ matrix.std }}
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:noble
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [17, 18, 19, 20, 21]
+        stdlib: [libstdc++, libc++]
+        std: [20, 23]
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq git cmake ninja-build libzstd-dev wget lsb-release \
+            software-properties-common gnupg ca-certificates
+          wget -qO- https://apt.llvm.org/llvm.sh > /tmp/llvm.sh
+          chmod +x /tmp/llvm.sh
+          /tmp/llvm.sh ${{ matrix.version }} || true
+          apt-get install -y -qq clang-${{ matrix.version }} || true
+          if [ "${{ matrix.stdlib }}" = "libc++" ]; then
+            apt-get install -y -qq libc++-${{ matrix.version }}-dev libc++abi-${{ matrix.version }}-dev || true
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        run: |
+          FLAGS=""
+          if [ "${{ matrix.stdlib }}" = "libc++" ]; then
+            FLAGS="-stdlib=libc++"
+          fi
+          cmake -S . -B build -GNinja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=clang++-${{ matrix.version }} \
+            -DCMAKE_CXX_FLAGS="$FLAGS" \
+            -DCMAKE_CXX_STANDARD=${{ matrix.std }} \
+            -DCMAKE_CTEST_ARGUMENTS="--output-on-failure"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  # musl rather than glibc. This is the configuration that caught errno_string
+  # assuming the GNU flavour of strerror_r, which no other Linux job would have
+  # noticed.
+  musl:
+    name: Alpine musl ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-latest }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # The checkout happens on the host, not in the container: actions run on
+      # the runner's own node binary, which is linked against glibc and cannot
+      # execute inside Alpine. Driving the container from a run step avoids
+      # needing any action to work in there.
+      - name: Build and test under musl
+        run: |
+          docker run --rm -v "$PWD":/src -w /src alpine:3.20 sh -c '
+            apk add --no-cache build-base cmake ninja zstd-dev linux-headers >/dev/null
+            cmake -S . -B build-musl -GNinja -DCMAKE_BUILD_TYPE=Debug
+            cmake --build build-musl --parallel
+            ./build-musl/uvfs_tests
+          '
+
+  # The library is usable without zstd, and archives written by such a build
+  # must still be readable by one that has it. Both directions are checked.
+  no_zstd:
+    name: Without zstd
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build libzstd-dev
+
+      - name: Build without zstd
+        run: |
+          cmake -S . -B build-nozstd -GNinja -DCMAKE_BUILD_TYPE=Debug -DUVFS_WITH_ZSTD=OFF
+          cmake --build build-nozstd --parallel
+          ctest --test-dir build-nozstd --output-on-failure
+
+      - name: Build with zstd
+        run: |
+          cmake -S . -B build-zstd -GNinja -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build-zstd --parallel
+
+      - name: An archive written without zstd is readable by a build with it
+        run: |
+          ./build-nozstd/uvfs create plain.uvfs README.md CMakeLists.txt
+          ./build-zstd/uvfs list plain.uvfs
+          ./build-zstd/uvfs verify plain.uvfs
+
+      - name: Compression is refused, not miscompiled
+        run: |
+          if ./build-nozstd/uvfs create bad.uvfs --compress README.md; then
+            echo "expected a build without zstd to refuse --compress"
+            exit 1
+          fi
+
+  # Link-time optimisation changes inlining enough to shake out different
+  # undefined behaviour, and the install/export rules only get exercised here.
+  lto_and_install:
+    name: LTO and installed-package consumption
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build libzstd-dev
+
+      - name: Build with LTO and install
+        run: |
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DUVFS_LTO=ON -DCMAKE_INSTALL_PREFIX=$PWD/prefix
+          cmake --build build --parallel
+          ctest --test-dir build --output-on-failure
+          cmake --build build --target install
+
+      - name: Consume the installed package from a separate project
+        run: |
+          mkdir -p /tmp/consumer
+          cd /tmp/consumer
+          cat > CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.16)
+          project(consumer LANGUAGES CXX)
+          find_package(uvfs REQUIRED)
+          add_executable(consumer main.cpp)
+          target_link_libraries(consumer PRIVATE uvfs::reader uvfs::writer)
+          EOF
+          cat > main.cpp <<'EOF'
+          #include <uvfs/reader.hpp>
+          #include <uvfs/writer.hpp>
+          #include <cstdio>
+          int main()
+          {
+            uvfs::writer w;
+            w.add_file("/self", "main.cpp");
+            w.commit("consumer.uvfs");
+            uvfs::reader r{"consumer.uvfs"};
+            std::printf("%zu entries\n", r.size());
+            return r.size() == 1 ? 0 : 1;
+          }
+          EOF
+          cmake -S . -B build -DCMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/prefix
+          cmake --build build
+          ./build/consumer
+
+      - name: Consume as a subdirectory
+        run: |
+          mkdir -p /tmp/subdir-consumer
+          cd /tmp/subdir-consumer
+          ln -s $GITHUB_WORKSPACE uvfs
+          cat > CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.16)
+          project(subconsumer LANGUAGES CXX)
+          add_subdirectory(uvfs uvfs-build)
+          add_executable(subconsumer main.cpp)
+          target_link_libraries(subconsumer PRIVATE uvfs_reader uvfs_writer)
+          EOF
+          cp /tmp/consumer/main.cpp .
+          cmake -S . -B build
+          cmake --build build
+          ./build/subconsumer
+
+  # Windows has a real backend now, so both toolchains are built and tested.
+  windows:
+    name: ${{ matrix.config.name }} ${{ matrix.build_type }}
+    runs-on: ${{ matrix.config.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+        config:
+          - { name: "MSVC x86_64", os: windows-latest, gen: "" }
+          - { name: "MSVC arm64", os: windows-11-arm, gen: "" }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -S . -B build ${{ matrix.config.gen }} \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DUVFS_WITH_ZSTD=OFF \
+            -DCMAKE_CTEST_ARGUMENTS="--output-on-failure"
+
+      - name: Build
+        run: cmake --build build --parallel --config ${{ matrix.build_type }}
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -C ${{ matrix.build_type }}
+
+  mingw:
+    name: MinGW x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++-mingw-w64-x86-64 cmake ninja-build wine64 wine
+
+      - name: Cross-build
+        run: |
+          cat > /tmp/mingw.cmake <<'EOF'
+          set(CMAKE_SYSTEM_NAME Windows)
+          set(CMAKE_SYSTEM_PROCESSOR x86_64)
+          set(CMAKE_C_COMPILER   x86_64-w64-mingw32-gcc-posix)
+          set(CMAKE_CXX_COMPILER x86_64-w64-mingw32-g++-posix)
+          set(CMAKE_FIND_ROOT_PATH /usr/x86_64-w64-mingw32)
+          set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+          set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+          set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+          set(CMAKE_EXE_LINKER_FLAGS "-static -static-libgcc -static-libstdc++")
+          EOF
+          cmake -S . -B build -GNinja -DCMAKE_TOOLCHAIN_FILE=/tmp/mingw.cmake \
+            -DCMAKE_BUILD_TYPE=Release -DUVFS_WITH_ZSTD=OFF
+          cmake --build build --parallel
+
+      # Running the Windows build is what caught the temp-file directory being
+      # derived with a POSIX separator, which no amount of cross-compiling
+      # would have shown.
+      - name: Run the suite under wine
+        run: |
+          export WINEDEBUG=-all
+          wine ./build/uvfs_tests.exe
+
+  emscripten:
+    name: Emscripten (wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+
+      - name: Build
+        run: |
+          # uvfs reports failures by throwing and emscripten does not catch
+          # exceptions unless asked; NODERAWFS gives the tests a real filesystem.
+          emcmake cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+            -DUVFS_WITH_ZSTD=OFF -DUVFS_BUILD_TOOLS=OFF \
+            -DCMAKE_CXX_FLAGS="-fexceptions" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fexceptions -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 -sNODERAWFS=1 -sSTACK_SIZE=8MB -sINITIAL_MEMORY=512MB"
+          cmake --build build --parallel
+
+      - name: Run the suite under node
+        run: node ./build/uvfs_tests.js
