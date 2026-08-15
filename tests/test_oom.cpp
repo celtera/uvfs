@@ -1,7 +1,7 @@
-// Resource limits and mount namespaces are POSIX concepts; these tests
-// exercise how the writer behaves when the system refuses it memory or
-// space, which is checked differently on Windows.
-#if !defined(_WIN32)
+// Driving a commit into an address-space limit needs RLIMIT_AS to be enforced
+// and a helper binary to run under it; both are arranged only on Linux, which
+// is also where the helper is built.
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
 
 #include "framework.hpp"
 
@@ -109,4 +109,4 @@ UVFS_TEST("oom/compression_worker_never_terminates")
 }
 #endif
 
-#endif // !_WIN32
+#endif // linux only

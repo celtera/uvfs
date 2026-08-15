@@ -33,7 +33,6 @@ jobs:
 
       - uses: vmactions/freebsd-vm@v1
         with:
-          release: "14.2"
           usesh: true
           sync: nfs
           copyback: false
@@ -41,12 +40,13 @@ jobs:
             pkg update -f -q
             pkg install -y cmake ninja git zstd
           run: |
+            set -x
             freebsd-version
             c++ --version
-            cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Debug \
-              -DCMAKE_CTEST_ARGUMENTS="--output-on-failure"
+            cmake --version
+            cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Debug
             cmake --build build --parallel
-            ctest --test-dir build --output-on-failure
+            ./build/uvfs_tests
 
   openbsd:
     name: OpenBSD
@@ -63,12 +63,12 @@ jobs:
           prepare: |
             pkg_add cmake ninja git zstd
           run: |
+            set -x
             uname -a
-            # OpenBSD's base clang is old enough that C++20 support varies;
-            # the build is what matters here, and the tests run if it links.
+            c++ --version
             cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Debug
             cmake --build build --parallel
-            ctest --test-dir build --output-on-failure
+            ./build/uvfs_tests
 
   netbsd:
     name: NetBSD
@@ -85,7 +85,8 @@ jobs:
           prepare: |
             /usr/sbin/pkg_add cmake ninja-build git zstd gcc13
           run: |
+            set -x
             uname -a
             cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Debug
             cmake --build build --parallel
-            ctest --test-dir build --output-on-failure
+            ./build/uvfs_tests

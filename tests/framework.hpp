@@ -1,7 +1,11 @@
 #pragma once
 // A very small test framework: no dependencies, registers tests through static
 // initialisers, and reports every failure rather than stopping at the first.
-#include <unistd.h>
+// clang-format off
+#if !defined(_WIN32)
+#include <unistd.h> // sysconf, for the resident-size probe
+#endif
+// clang-format on
 
 #include <atomic>
 #include <cstdio>
