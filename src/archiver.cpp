@@ -258,10 +258,12 @@ auto cmd_extract(const std::string& archive, const std::string& outdir) -> int
       continue;
     buf = std::move(*payload);
     const int64_t n = std::ssize(buf);
-    FILE* f = std::fopen(target.c_str(), "wb");
+    // path::c_str() is wchar_t* on Windows, so go through string().
+    const auto target_utf8 = target.string();
+    FILE* f = std::fopen(target_utf8.c_str(), "wb");
     if (!f)
     {
-      std::fprintf(stderr, "uvfs: could not write %s\n", target.c_str());
+      std::fprintf(stderr, "uvfs: could not write %s\n", target_utf8.c_str());
       return 1;
     }
     if (n > 0)

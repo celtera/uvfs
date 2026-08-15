@@ -115,18 +115,20 @@ struct scratch_dir
     std::mt19937_64 rng{seed};
     for (auto& c : data)
       c = static_cast<char>(rng() & 0xff);
-    FILE* f = std::fopen(p.c_str(), "wb");
+    const auto p_utf8 = p.string();
+    FILE* f = std::fopen(p_utf8.c_str(), "wb");
     if (n)
       std::fwrite(data.data(), 1, n, f);
     std::fclose(f);
-    return p.string();
+    return p_utf8;
   }
 
   auto make_text(std::string_view leaf, std::string_view content) const -> std::string
   {
     auto p = path / leaf;
     std::filesystem::create_directories(p.parent_path());
-    FILE* f = std::fopen(p.c_str(), "wb");
+    const auto p_utf8 = p.string();
+    FILE* f = std::fopen(p_utf8.c_str(), "wb");
     if (!content.empty())
       std::fwrite(content.data(), 1, content.size(), f);
     std::fclose(f);
@@ -142,6 +144,9 @@ struct scratch_dir
 //! quietly asserting against zero.
 inline auto current_rss_kb() -> long
 {
+#if defined(_WIN32)
+  return -1; // no /proc; the tests that need this skip themselves
+#else
   FILE* f = std::fopen("/proc/self/statm", "r");
   if (!f)
     return -1;
@@ -151,6 +156,7 @@ inline auto current_rss_kb() -> long
   if (!ok)
     return -1;
   return resident * (sysconf(_SC_PAGESIZE) / 1024);
+#endif
 }
 
 inline auto have_current_rss() -> bool

@@ -1,3 +1,8 @@
+// Resource limits and mount namespaces are POSIX concepts; these tests
+// exercise how the writer behaves when the system refuses it memory or
+// space, which is checked differently on Windows.
+#if !defined(_WIN32)
+
 // Helper for the out-of-memory tests: runs one commit under an address-space
 // limit, in its own process, so that a std::terminate is observable as a
 // signal rather than taking the test suite down with it.
@@ -74,3 +79,5 @@ auto main(int argc, char** argv) -> int
     return 11;
   }
 }
+
+#endif // !_WIN32

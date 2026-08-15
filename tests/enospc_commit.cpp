@@ -1,3 +1,5 @@
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+
 // Helper for the disk-full tests: builds one archive into a directory that is
 // deliberately too small, in its own process and mount namespace, so a SIGBUS
 // is observable rather than fatal to the test suite.
@@ -66,3 +68,5 @@ auto main(int argc, char** argv) -> int
     return 10;
   }
 }
+
+#endif // linux only

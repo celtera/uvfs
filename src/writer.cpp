@@ -1,6 +1,7 @@
-#include "fd_handle.hpp"
 #include "format.hpp"
 #include "hash.hpp"
+#include "output_region.hpp"
+#include "platform.hpp"
 #include "scope_guard.hpp"
 #include "zstd_codec.hpp"
 
@@ -11,11 +12,13 @@
 #include <atomic>
 #include <cerrno>
 #include <cstdio>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include <system_error>
 #include <unordered_map>
 
 #if defined(UVFS_HAS_ZSTD)
@@ -53,7 +56,7 @@ struct placed
 
 void unlink_quietly(const std::string& p) noexcept
 {
-  ::unlink(p.c_str());
+  platform::remove_quietly(p.c_str());
 }
 
 //! Copying files is bound by per-file syscalls and page-cache contention, not
@@ -66,6 +69,14 @@ constexpr int copy_thread_cap = 12;
 
 [[nodiscard]] auto worker_count(int64_t items, int requested, int cap = 0) -> int
 {
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+  // A build without pthreads cannot create a thread at all; asking anyway
+  // throws "thread constructor failed" from inside the writer.
+  (void)requested;
+  (void)cap;
+  (void)items;
+  return 1;
+#else
   int hw = requested;
   if (hw <= 0)
   {
@@ -77,6 +88,7 @@ constexpr int copy_thread_cap = 12;
   }
   return static_cast<int>(
       std::min<int64_t>(static_cast<int64_t>(hw), std::max<int64_t>(items, 1)));
+#endif
 }
 
 //! Runs `body(i)` for i in [0, n) across a pool sized to the work.
@@ -86,6 +98,17 @@ void parallel_for(int64_t n, int requested_threads, F&& body, int cap = 0)
   if (n <= 0)
     return;
   const int threads = worker_count(n, requested_threads, cap);
+
+  // One worker means the caller's thread, with no thread objects created at
+  // all. That is the fast path for small archives and the only path on a
+  // platform without threads.
+  if (threads <= 1)
+  {
+    for (int64_t i = 0; i < n; i++)
+      body(i);
+    return;
+  }
+
   std::atomic<int64_t> next{0};
 
   // std::thread rather than std::jthread: jthread needs libc++ 18, which is
@@ -103,18 +126,32 @@ void parallel_for(int64_t n, int requested_threads, F&& body, int cap = 0)
                                    t.join();
                              }};
 
+  const auto worker = [&]
+  {
+    for (;;)
+    {
+      const int64_t i = next.fetch_add(1, std::memory_order_relaxed);
+      if (i >= n)
+        return;
+      body(i);
+    }
+  };
+
   for (int t = 0; t < threads; t++)
-    pool.emplace_back(
-        [&]
-        {
-          for (;;)
-          {
-            const int64_t i = next.fetch_add(1, std::memory_order_relaxed);
-            if (i >= n)
-              return;
-            body(i);
-          }
-        });
+  {
+    try
+    {
+      pool.emplace_back(worker);
+    }
+    catch (const std::system_error&)
+    {
+      // The system refused another thread. Whatever was started is still
+      // running and will be joined; the caller's thread takes the rest rather
+      // than failing the whole archive over it.
+      break;
+    }
+  }
+  worker();
 }
 
 #if defined(UVFS_HAS_ZSTD)
@@ -129,8 +166,8 @@ void parallel_for(int64_t n, int requested_threads, F&& body, int cap = 0)
 {
   try
   {
-    auto fd = fd_handle::open_ro(path.c_str());
-    const auto actual = fd.filesize();
+    auto fd = platform::file::open_read(path.c_str());
+    const auto actual = fd.size();
     if (actual != expected)
     {
       error = "file changed size while the archive was being written ("
@@ -138,22 +175,10 @@ void parallel_for(int64_t n, int requested_threads, F&& body, int cap = 0)
       return false;
     }
     out.resize(static_cast<std::size_t>(actual));
-    int64_t done = 0;
-    while (done < actual)
+    if (fd.read_at(out.data(), actual, 0) != actual)
     {
-      const auto got = ::pread(
-          fd.get(), out.data() + done, static_cast<size_t>(actual - done), done);
-      if (got < 0)
-      {
-        error = "read failed: " + errno_string(errno);
-        return false;
-      }
-      if (got == 0)
-      {
-        error = "file ended early";
-        return false;
-      }
-      done += got;
+      error = "file ended early";
+      return false;
     }
     return true;
   }
@@ -164,81 +189,6 @@ void parallel_for(int64_t n, int requested_threads, F&& body, int cap = 0)
   }
 }
 #endif // UVFS_HAS_ZSTD
-
-//! Above this size a payload is copied by the kernel with copy_file_range
-//! instead of being pulled through user space. Below it the extra syscall
-//! costs more than the copy saves.
-constexpr int64_t kernel_copy_threshold = int64_t{256} * 1024;
-
-//! Copies `size` bytes of `src` into the destination file at `dst_offset`,
-//! which is also mapped at `dst`.
-//!
-//! Small files go through pread. mmap-per-file used to be used here, and it
-//! cost two syscalls plus a TLB shootdown broadcast to every core -- with
-//! dozens of writer threads that was the single most expensive thing the
-//! writer did. Large files are handed to copy_file_range so the bytes never
-//! enter user space at all; it can also reflink instead of copying on
-//! filesystems that support it.
-void copy_payload(
-    const fd_handle& src,
-    int dst_fd,
-    int64_t dst_offset,
-    char* dst,
-    int64_t size)
-{
-#if defined(__linux__)
-  if (size >= kernel_copy_threshold)
-  {
-    int64_t done = 0;
-    bool usable = true;
-    while (done < size && usable)
-    {
-      off_t in_off = done;
-      off_t out_off = dst_offset + done;
-      const auto moved = ::copy_file_range(
-          src.get(), &in_off, dst_fd, &out_off, static_cast<size_t>(size - done), 0);
-      if (moved > 0)
-        done += moved;
-      else
-        usable = false; // not supported here (EXDEV, EINVAL, ...); fall back
-    }
-    if (done == size)
-      return;
-    // Partially copied by the kernel: finish the rest through pread. The
-    // source offset stays absolute (done + rest) while the destination is
-    // addressed through the mapping, so dst_offset plays no further part.
-    dst += done;
-    size -= done;
-    int64_t rest = 0;
-    while (rest < size)
-    {
-      const auto got = ::pread(
-          src.get(), dst + rest, static_cast<size_t>(size - rest), done + rest);
-      if (got < 0)
-        throw std::runtime_error("read failed: " + errno_string(errno));
-      if (got == 0)
-        throw std::runtime_error("file ended early");
-      rest += got;
-    }
-    return;
-  }
-#else
-  (void)dst_fd;
-  (void)dst_offset;
-#endif
-
-  int64_t done = 0;
-  while (done < size)
-  {
-    const auto got
-        = ::pread(src.get(), dst + done, static_cast<size_t>(size - done), done);
-    if (got < 0)
-      throw std::runtime_error("read failed: " + errno_string(errno));
-    if (got == 0)
-      throw std::runtime_error("file ended early");
-    done += got;
-  }
-}
 
 //! How many bytes of input a single compression batch holds in memory at once.
 constexpr int64_t compression_batch_bytes = int64_t{64} * 1024 * 1024;
@@ -276,9 +226,9 @@ sample_says_compress(const std::string& path, const compression_settings& cs) ->
 {
   try
   {
-    auto fd = fd_handle::open_ro(path.c_str());
+    auto fd = platform::file::open_read(path.c_str());
     std::vector<char> sample(static_cast<std::size_t>(sample_bytes));
-    const auto got = ::pread(fd.get(), sample.data(), sample.size(), 0);
+    const auto got = fd.read_at(sample.data(), sample_bytes, 0);
     if (got <= 0)
       return false;
     std::vector<char> dst(static_cast<std::size_t>(zstd_bound(got)));
@@ -360,7 +310,7 @@ sample_says_compress(const std::string& path, const compression_settings& cs) ->
     const ZSTD_CDict* dict,
     std::string& error) -> int64_t
 {
-  auto fd = fd_handle::open_ro(path.c_str());
+  auto fd = platform::file::open_read(path.c_str());
   const std::unique_ptr<ZSTD_CCtx, size_t (*)(ZSTD_CCtx*)> ctx{
       ZSTD_createCCtx(), &ZSTD_freeCCtx};
   if (!ctx)
@@ -381,11 +331,10 @@ sample_says_compress(const std::string& path, const compression_settings& cs) ->
   while (consumed < size)
   {
     const auto want = std::min<int64_t>(stream_chunk, size - consumed);
-    const auto got
-        = ::pread(fd.get(), in.data(), static_cast<std::size_t>(want), consumed);
+    const auto got = fd.read_at(in.data(), want, consumed);
     if (got <= 0)
     {
-      error = got < 0 ? "read failed: " + errno_string(errno) : "file ended early";
+      error = "file ended early";
       return -1;
     }
     consumed += got;
@@ -427,7 +376,7 @@ template <typename OnError>
 auto place_compressed(
     std::vector<placed>& plan,
     char* payloads,
-    const fd_handle& out,
+    const platform::file& out,
     int64_t data_base,
     const std::vector<char>& dictionary,
     const compression_settings& cs,
@@ -447,8 +396,6 @@ auto place_compressed(
   (void)on_error;
   throw no_zstd_error("compression");
 #else
-  const int dst_fd = out.get();
-
   // Blocks are reserved ahead of the cursor, in chunks, because the final size
   // is only known once every payload has been compressed. Writing through the
   // mapping into a hole that the filesystem cannot fill is a SIGBUS, not an
@@ -460,7 +407,7 @@ auto place_compressed(
     if (!can_reserve || data_end <= reserved)
       return;
     const int64_t grow_to = std::max(data_end, reserved + (int64_t{32} << 20));
-    can_reserve = out.reserve_range(data_base + reserved, grow_to - reserved);
+    can_reserve = out.reserve(data_base + reserved, grow_to - reserved);
     reserved = grow_to;
   };
   const int64_t n = std::ssize(plan);
@@ -549,8 +496,8 @@ auto place_compressed(
       try
       {
         reserve_through(at + p.size);
-        auto fd = fd_handle::open_ro(p.src->path_in_system.c_str());
-        copy_payload(fd, dst_fd, data_base + at, payloads + at, p.size);
+        auto fd = platform::file::open_read(p.src->path_in_system.c_str());
+        platform::copy_file_into(fd, out, data_base + at, payloads + at, p.size);
         p.data_offset = at;
         p.stored_size = p.size;
         p.method = codec::store;
@@ -837,18 +784,14 @@ void writer::commit(std::string_view path)
 
   for (const auto& e : impl->entries)
   {
-    struct stat st
-    {
-    };
-    if (::stat(e.path_in_system.c_str(), &st) != 0)
+    const auto st = platform::stat_path(e.path_in_system.c_str());
+    if (!st.exists)
     {
       impl->skipped.push_back(
-          {e.path_in_archive,
-           e.path_in_system,
-           "could not stat: " + errno_string(errno)});
+          {e.path_in_archive, e.path_in_system, "could not stat the file"});
       continue;
     }
-    if (!S_ISREG(st.st_mode))
+    if (!st.regular)
     {
       impl->skipped.push_back(
           {e.path_in_archive, e.path_in_system, "not a regular file"});
@@ -857,17 +800,13 @@ void writer::commit(std::string_view path)
     // Only worth a syscall per file when the caller wants unreadable inputs
     // silently skipped; otherwise the copy will fail and report it anyway.
     if (impl->policy == on_unreadable::skip
-        && ::access(e.path_in_system.c_str(), R_OK) != 0)
+        && !platform::readable(e.path_in_system.c_str()))
     {
-      impl->skipped.push_back(
-          {e.path_in_archive, e.path_in_system, "not readable: " + errno_string(errno)});
+      impl->skipped.push_back({e.path_in_archive, e.path_in_system, "not readable"});
       continue;
     }
-    plan.push_back(placed{
-        .src = &e,
-        .size = st.st_size,
-        .device = static_cast<uint64_t>(st.st_dev),
-        .inode = static_cast<uint64_t>(st.st_ino)});
+    plan.push_back(
+        placed{.src = &e, .size = st.size, .device = st.device, .inode = st.inode});
   }
 
   if (!impl->skipped.empty() && impl->policy == on_unreadable::fail)
@@ -982,11 +921,18 @@ void writer::commit(std::string_view path)
   // The archive is built under a temporary name in the destination directory
   // and renamed into place at the end, so a failure part way through cannot
   // leave a corrupt archive where a good one used to be.
-  const auto slash = out.find_last_of('/');
-  const std::string dir
-      = (slash == std::string::npos) ? std::string{"."} : out.substr(0, slash);
-  const std::string tmp = dir + "/.uvfs-tmp-" + std::to_string(::getpid()) + "-"
-                          + std::to_string(reinterpret_cast<uintptr_t>(&out));
+  // The temporary has to sit in the destination's own directory so that the
+  // final rename stays within one filesystem and is therefore atomic. Deriving
+  // that directory by searching for '/' silently did the wrong thing on
+  // Windows, where the separator is a backslash: the temporary was created in
+  // the current directory instead, which is not writable in plenty of places.
+  std::filesystem::path out_dir = std::filesystem::path{out}.parent_path();
+  if (out_dir.empty())
+    out_dir = std::filesystem::path{"."};
+  const std::string tmp = (out_dir
+                           / (".uvfs-tmp-" + std::to_string(platform::process_id()) + "-"
+                              + std::to_string(reinterpret_cast<uintptr_t>(&out))))
+                              .string();
 
   // Compression makes the final size unknown until every payload is placed, so
   // the file is mapped at its uncompressed upper bound and truncated back down
@@ -1007,14 +953,14 @@ void writer::commit(std::string_view path)
 
   try
   {
-    auto handle = fd_handle::create_rw(tmp.c_str(), 0644);
+    auto handle = platform::file::create_write(tmp.c_str());
     // The header, index and dictionary are written through the mapping too, so
     // they need real blocks behind them just as much as the payloads do.
-    handle.reserve_range(0, h.data_start);
+    handle.reserve(0, h.data_start);
     if (!compressing)
     {
       // Sizes are final, so the whole thing can be reserved in one call.
-      handle.reserve_range(h.data_start, worst_case_data);
+      handle.reserve(h.data_start, worst_case_data);
     }
     // With compression the final size is not known yet, so the data region is
     // reserved incrementally as payloads are placed; see place_compressed.
@@ -1022,11 +968,11 @@ void writer::commit(std::string_view path)
 
     int64_t data_used = 0;
     {
-      const auto data = handle.map_rw(upper_bound);
-      char* const payloads = data.bytes + h.data_start;
+      auto data = output_region::create(handle, upper_bound);
+      char* const payloads = data.data() + h.data_start;
 
       if (!dictionary.empty())
-        memcpy(data.bytes + h.dict_start, dictionary.data(), dictionary.size());
+        memcpy(data.data() + h.dict_start, dictionary.data(), dictionary.size());
 
       // Called from worker threads, so it must not throw: an exception here
       // would escape the very handler that exists to stop exceptions escaping.
@@ -1048,7 +994,6 @@ void writer::commit(std::string_view path)
         }
       };
 
-      const int dst_fd = handle.get();
       const bool want_hashes = impl->content_hashes;
       const int threads = impl->threads;
       if (!compressing)
@@ -1088,13 +1033,14 @@ void writer::commit(std::string_view path)
               // to abort the process. Failures are recorded, not thrown.
               try
               {
-                auto fd = fd_handle::open_ro(p.src->path_in_system.c_str());
-                const auto actual = fd.filesize();
+                auto fd = platform::file::open_read(p.src->path_in_system.c_str());
+                const auto actual = fd.size();
                 if (actual != p.size)
                   throw std::runtime_error(
                       "file changed size while the archive was being written ("
                       + std::to_string(p.size) + " -> " + std::to_string(actual) + ")");
-                copy_payload(fd, dst_fd, h.data_start + p.data_offset, dst, p.size);
+                platform::copy_file_into(
+                    fd, handle, h.data_start + p.data_offset, dst, p.size);
                 if (want_hashes)
                   p.content_hash = hash_bytes(dst, static_cast<std::size_t>(p.size));
               }
@@ -1144,7 +1090,7 @@ void writer::commit(std::string_view path)
         h.data_size = data_used;
         h.file_size = h.data_start + data_used;
 
-        auto* const index = data.bytes + h.index_start;
+        auto* const index = data.data() + h.index_start;
         auto* const table = index + h.table_offset();
         auto* const names = index + h.names_offset();
 
@@ -1195,15 +1141,13 @@ void writer::commit(std::string_view path)
         }
 
         h.index_hash = hash_bytes(index, static_cast<std::size_t>(h.index_size));
-        h.store_to(data.bytes);
-        h.header_hash = hash_bytes(data.bytes, header::hashed_prefix);
-        store<uint64_t>(data.bytes + header::hashed_prefix, h.header_hash);
+        h.store_to(data.data());
+        h.header_hash = hash_bytes(data.data(), header::hashed_prefix);
+        store<uint64_t>(data.data() + header::hashed_prefix, h.header_hash);
 
         // Push our own dirty pages, rather than every dirty page on the
         // machine, which is what a bare sync() does.
-        if (msync(data.bytes, static_cast<std::size_t>(h.file_size), MS_SYNC) != 0)
-          throw std::runtime_error(
-              "uvfs: could not flush mapping (" + errno_string(errno) + "): ");
+        data.flush(h.file_size);
       }
     } // unmap
 
@@ -1211,7 +1155,7 @@ void writer::commit(std::string_view path)
     {
       if (copy_errors.empty())
         copy_errors.push_back({"", "", "out of memory while building the archive"});
-      handle.close_now();
+      handle.close();
       auto msg = "uvfs: " + std::to_string(copy_errors.size())
                  + " file(s) failed while being copied, archive not written; "
                    "first: "
@@ -1222,12 +1166,12 @@ void writer::commit(std::string_view path)
 
     // Give back whatever compression saved.
     handle.resize(h.file_size);
-    handle.sync();
-    handle.close_now();
+    handle.flush();
+    handle.close();
 
-    if (::rename(tmp.c_str(), out.c_str()) != 0)
+    if (!platform::rename_replace(tmp.c_str(), out.c_str()))
       throw std::runtime_error(
-          "uvfs: could not publish archive (" + errno_string(errno) + "): ");
+          "uvfs: could not publish archive (" + platform::last_error() + "): ");
 
     // The archive is in place under its final name; there is no temporary
     // left to remove.

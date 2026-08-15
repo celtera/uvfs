@@ -1,10 +1,14 @@
 #pragma once
 
-#if defined(UVFS_BUILD_LIBRARY)
+// Only one spelling is correct per compiler; listing all three meant every
+// compiler warned about the two it does not understand.
+#if defined(UVFS_BUILD_LIBRARY) && defined(UVFS_SHARED)
 #if defined(_WIN32)
-#define UVFS_EXPORT [[gnu::dllexport]] [[clang::dllexport]] __declspec(dllexport)
+#define UVFS_EXPORT __declspec(dllexport)
+#elif defined(__GNUC__) || defined(__clang__)
+#define UVFS_EXPORT __attribute__((visibility("default")))
 #else
-#define UVFS_EXPORT [[gnu::visibility("default")]]
+#define UVFS_EXPORT
 #endif
 #else
 #define UVFS_EXPORT

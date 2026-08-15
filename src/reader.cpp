@@ -1,6 +1,6 @@
-#include "fd_handle.hpp"
 #include "format.hpp"
 #include "hash.hpp"
+#include "platform.hpp"
 #include "zstd_codec.hpp"
 
 #include <uvfs/reader.hpp>
@@ -17,12 +17,12 @@ namespace uvfs
 struct reader::impl
 {
   explicit impl(std::string_view path)
-      : handle{fd_handle::open_ro(std::string{path}.c_str())}
+      : handle{platform::file::open_read(std::string{path}.c_str())}
   {
   }
 
-  fd_handle handle;
-  mmap_handle<const char*> map;
+  platform::file handle;
+  platform::mapping map;
   integrity check{integrity::header_only};
 
 #if defined(UVFS_HAS_ZSTD)
@@ -192,12 +192,12 @@ reader::reader(std::string_view path, integrity check)
 try : impl{std::make_unique<struct impl>(path)}
 {
   impl->check = check;
-  const auto filesize = impl->handle.filesize();
+  const auto filesize = impl->handle.size();
   if (filesize < header_size)
     throw std::runtime_error("uvfs: file is smaller than a header: ");
 
-  impl->map = impl->handle.map_ro(filesize);
-  const char* const base = impl->map.bytes;
+  impl->map = platform::mapping::read_only(impl->handle, filesize);
+  const char* const base = impl->map.data();
 
   impl->h = header::load_from(base);
 

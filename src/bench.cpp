@@ -7,8 +7,8 @@
 //   read-all    open + read every file
 //
 // Usage: uvfs_bench <file-list> <scratch-dir>
-#include <fcntl.h>
-#include <unistd.h>
+#include "platform.hpp"
+
 #include <uvfs/reader.hpp>
 #include <uvfs/writer.hpp>
 
@@ -42,15 +42,10 @@ auto read_list(const std::string& p) -> std::vector<std::string>
   return v;
 }
 
-//! Drops an archive from the page cache. Works unprivileged.
+//! Drops an archive from the page cache, where the platform allows it.
 void evict(const std::string& p)
 {
-  const int fd = ::open(p.c_str(), O_RDONLY);
-  if (fd < 0)
-    return;
-  ::fsync(fd);
-  ::posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
-  ::close(fd);
+  uvfs::platform::evict_from_cache(p.c_str());
 }
 
 template <typename F>

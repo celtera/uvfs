@@ -1,3 +1,8 @@
+// Resource limits and mount namespaces are POSIX concepts; these tests
+// exercise how the writer behaves when the system refuses it memory or
+// space, which is checked differently on Windows.
+#if !defined(_WIN32)
+
 #include "framework.hpp"
 
 #include <cstdio>
@@ -103,3 +108,5 @@ UVFS_TEST("oom/compression_worker_never_terminates")
   CHECK_EQ(aborted, 0);
 }
 #endif
+
+#endif // !_WIN32

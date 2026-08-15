@@ -1,3 +1,8 @@
+// Filling a filesystem on demand needs unshare(1) and Linux mount
+// namespaces. Elsewhere the writer still reports ENOSPC, but arranging for
+// it portably is not something a unit test can do.
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+
 #include "framework.hpp"
 
 #include <cstdio>
@@ -122,3 +127,5 @@ UVFS_TEST("enospc/an_archive_that_fits_still_commits")
     CHECK_EQ(r.exit_code, 0);
   }
 }
+
+#endif // linux only

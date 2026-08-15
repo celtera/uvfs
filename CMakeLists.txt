@@ -82,8 +82,10 @@ set(UVFS_XXHASH_INC ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/xxHash)
 # ------------------------------------------------------------------- library
 add_library(uvfs_reader STATIC
   src/reader.cpp
-  src/fd_handle.hpp
   src/format.hpp
+  src/platform.hpp
+  src/platform_posix.hpp
+  src/platform_win32.hpp
 )
 add_library(uvfs::reader ALIAS uvfs_reader)
 # Without EXPORT_NAME the installed target would be uvfs::uvfs_reader, so the
@@ -104,8 +106,11 @@ target_include_directories(uvfs_reader PUBLIC
 
 add_library(uvfs_writer STATIC
   src/writer.cpp
-  src/fd_handle.hpp
   src/format.hpp
+  src/output_region.hpp
+  src/platform.hpp
+  src/platform_posix.hpp
+  src/platform_win32.hpp
 )
 add_library(uvfs::writer ALIAS uvfs_writer)
 set_target_properties(uvfs_writer PROPERTIES EXPORT_NAME writer)
@@ -148,6 +153,7 @@ if(UVFS_BUILD_TESTS)
     tests/test_cleanup.cpp
     tests/test_enospc.cpp
     tests/test_api.cpp
+    tests/test_platform.cpp
   )
   target_link_libraries(uvfs_tests
     PRIVATE uvfs_reader uvfs_writer $<BUILD_INTERFACE:uvfs_build_settings>)
@@ -163,6 +169,9 @@ if(UVFS_BUILD_TESTS)
   target_include_directories(uvfs_tests SYSTEM PRIVATE ${UVFS_XXHASH_INC})
   # Runs one commit under an RLIMIT_AS cap in its own process, so that a
   # std::terminate inside a worker is observable instead of fatal to the suite.
+  # The disk-full and memory-limit helpers use Linux namespaces and POSIX
+  # resource limits, so they are only built where they can run.
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_executable(uvfs_enospc_commit tests/enospc_commit.cpp)
   target_link_libraries(uvfs_enospc_commit
     PRIVATE uvfs_writer $<BUILD_INTERFACE:uvfs_build_settings>)
@@ -176,6 +185,7 @@ if(UVFS_BUILD_TESTS)
   add_dependencies(uvfs_tests uvfs_oom_commit)
   target_compile_definitions(uvfs_tests PRIVATE
     UVFS_OOM_HELPER="$<TARGET_FILE:uvfs_oom_commit>")
+  endif()
 
   add_test(NAME uvfs_tests COMMAND uvfs_tests)
 endif()
