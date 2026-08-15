@@ -1,6 +1,7 @@
 #include "fd_handle.hpp"
 #include "format.hpp"
 #include "hash.hpp"
+#include "scope_guard.hpp"
 #include "zstd_codec.hpp"
 
 #include <uvfs/path.hpp>
@@ -894,6 +895,14 @@ void writer::commit(std::string_view path)
   std::vector<skipped_file> copy_errors;
   std::mutex errors_mutex;
   std::atomic<bool> had_error{false};
+
+  // Removing the temporary in catch clauses only cleaned up for the exception
+  // types those clauses happened to name: a std::bad_alloc or a
+  // std::length_error escaped both of them and left a full-size file behind,
+  // which for a large archive is a gigabyte of litter. The guard does not need
+  // to know what went wrong.
+  scope_guard discard_temp{[&] { unlink_quietly(tmp); }};
+
   try
   {
     auto handle = fd_handle::create_rw(tmp.c_str(), 0644);
@@ -1083,7 +1092,6 @@ void writer::commit(std::string_view path)
       if (copy_errors.empty())
         copy_errors.push_back({"", "", "out of memory while building the archive"});
       handle.close_now();
-      unlink_quietly(tmp);
       auto msg = "uvfs: " + std::to_string(copy_errors.size())
                  + " file(s) failed while being copied, archive not written; "
                    "first: "
@@ -1098,11 +1106,12 @@ void writer::commit(std::string_view path)
     handle.close_now();
 
     if (::rename(tmp.c_str(), out.c_str()) != 0)
-    {
-      const auto err = errno_string(errno);
-      unlink_quietly(tmp);
-      throw std::runtime_error("uvfs: could not publish archive (" + err + "): ");
-    }
+      throw std::runtime_error(
+          "uvfs: could not publish archive (" + errno_string(errno) + "): ");
+
+    // The archive is in place under its final name; there is no temporary
+    // left to remove.
+    discard_temp.dismiss();
   }
   catch (const commit_error&)
   {
@@ -1110,9 +1119,9 @@ void writer::commit(std::string_view path)
   }
   catch (const std::runtime_error& e)
   {
-    unlink_quietly(tmp);
     throw std::runtime_error(std::string(e.what()).append(out));
   }
+  // Every other exception type propagates unchanged, and the guard still runs.
 }
 
 }

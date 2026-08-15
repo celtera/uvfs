@@ -141,6 +141,7 @@ if(UVFS_BUILD_TESTS)
     tests/test_compression.cpp
     tests/test_dedup.cpp
     tests/test_oom.cpp
+    tests/test_cleanup.cpp
   )
   target_link_libraries(uvfs_tests
     PRIVATE uvfs_reader uvfs_writer $<BUILD_INTERFACE:uvfs_build_settings>)
