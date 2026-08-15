@@ -76,21 +76,20 @@ public:
   //! when the entry may be compressed, or stat() to find out which it is.
   //! Throws only under integrity::full, when the payload fails its checksum --
   //! a damaged payload is reported rather than quietly reported as missing.
-  [[nodiscard]] auto find(std::string_view path) const
-      -> std::optional<byte_array>;
+  [[nodiscard]] auto find(std::string_view path) const -> std::optional<byte_array>;
 
   //! Metadata without touching the payload.
-  [[nodiscard]] auto stat(std::string_view path) const noexcept
-      -> std::optional<file_info>;
+  [[nodiscard]] auto
+  stat(std::string_view path) const noexcept -> std::optional<file_info>;
 
   //! Decompresses if needed. Works for every entry.
-  [[nodiscard]] auto read(std::string_view path) const
-      -> std::optional<std::vector<char>>;
+  [[nodiscard]] auto
+  read(std::string_view path) const -> std::optional<std::vector<char>>;
 
   //! Decompresses into caller-provided storage. `out` must be at least
   //! stat()->size bytes. Returns the number of bytes written.
-  [[nodiscard]] auto read_into(std::string_view path, char* out, int64_t capacity)
-      const -> std::optional<int64_t>;
+  [[nodiscard]] auto read_into(std::string_view path, char* out, int64_t capacity) const
+      -> std::optional<int64_t>;
 
   // ------------------------------------------------------------- iteration
   // Entries are stored sorted by path, so index order is sorted order. That is

@@ -74,7 +74,8 @@ inline auto build_sample(const scratch_dir& dir) -> std::string
   for (auto* n : names)
   {
     const auto src = dir.make_file(
-        "src" + std::to_string(i), 40u + static_cast<unsigned>(i) * 17u,
+        "src" + std::to_string(i),
+        40u + static_cast<unsigned>(i) * 17u,
         static_cast<uint64_t>(i + 1));
     w.add_file(n, src);
     i++;

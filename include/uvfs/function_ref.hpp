@@ -1,6 +1,7 @@
 #pragma once
-#include <type_traits>
 #include <utility>
+
+#include <type_traits>
 
 namespace uvfs
 {
@@ -22,10 +23,11 @@ struct function_ref<R(Args...)>
           && std::is_invocable_r_v<R, F&, Args...>>>
   function_ref(F&& f) noexcept
       : object{const_cast<void*>(static_cast<const void*>(std::addressof(f)))}
-      , invoke{[](void* obj, Args... args) -> R {
-        return (*static_cast<std::remove_reference_t<F>*>(obj))(
-            std::forward<Args>(args)...);
-      }}
+      , invoke{
+            [](void* obj, Args... args) -> R {
+              return (*static_cast<std::remove_reference_t<F>*>(obj))(
+                  std::forward<Args>(args)...);
+            }}
   {
   }
 

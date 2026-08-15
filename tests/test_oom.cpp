@@ -20,14 +20,16 @@ struct run_result
 
 //! Runs the helper under an address-space limit and reports how it ended.
 auto run_under_limit(
-    const scratch_dir& dir, long long limit_mb, int count, int file_mb, int threads)
-    -> run_result
+    const scratch_dir& dir,
+    long long limit_mb,
+    int count,
+    int file_mb,
+    int threads) -> run_result
 {
-  const std::string cmd = std::string{UVFS_OOM_HELPER} + " "
-                          + std::to_string(limit_mb) + " " + dir.path.string()
-                          + " " + std::to_string(count) + " "
-                          + std::to_string(file_mb) + " "
-                          + std::to_string(threads) + " 2>&1";
+  const std::string cmd = std::string{UVFS_OOM_HELPER} + " " + std::to_string(limit_mb)
+                          + " " + dir.path.string() + " " + std::to_string(count) + " "
+                          + std::to_string(file_mb) + " " + std::to_string(threads)
+                          + " 2>&1";
   run_result r;
   FILE* p = popen(cmd.c_str(), "r");
   if (!p)
@@ -75,7 +77,9 @@ UVFS_TEST("oom/compression_worker_never_terminates")
     {
       aborted++;
       std::printf(
-          "    limit=%lldMB died on signal %d: %s\n", limit, r.signal,
+          "    limit=%lldMB died on signal %d: %s\n",
+          limit,
+          r.signal,
           r.output.substr(0, 80).c_str());
     }
     else if (r.exit_code == 10 || r.exit_code == 11)
@@ -92,8 +96,10 @@ UVFS_TEST("oom/compression_worker_never_terminates")
     CHECK_EQ(leftovers, 0);
   }
   std::printf(
-      "    (%d succeeded, %d reported an error, %d aborted)\n", succeeded,
-      reported, aborted);
+      "    (%d succeeded, %d reported an error, %d aborted)\n",
+      succeeded,
+      reported,
+      aborted);
   CHECK_EQ(aborted, 0);
 }
 #endif

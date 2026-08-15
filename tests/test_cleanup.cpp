@@ -39,12 +39,18 @@ UVFS_TEST("cleanup/guard_runs_on_every_exception_type")
     uvfs::scope_guard guard{[&] { ran++; }};
     switch (which)
     {
-      case 0: throw std::runtime_error{"runtime"};
-      case 1: throw std::bad_alloc{};
-      case 2: throw std::length_error{"length"};
-      case 3: throw std::invalid_argument{"invalid"};
-      case 4: throw oddball{};
-      default: break;
+      case 0:
+        throw std::runtime_error{"runtime"};
+      case 1:
+        throw std::bad_alloc{};
+      case 2:
+        throw std::length_error{"length"};
+      case 3:
+        throw std::invalid_argument{"invalid"};
+      case 4:
+        throw oddball{};
+      default:
+        break;
     }
   };
 

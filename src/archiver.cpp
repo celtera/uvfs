@@ -7,8 +7,9 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
-#include <string_view>
 #include <vector>
+
+#include <string_view>
 
 namespace fs = std::filesystem;
 
@@ -133,10 +134,11 @@ auto cmd_create(int argc, char** argv) -> int
     {
       // Symlinked directories are not followed: doing so double-counts files
       // reachable by more than one path, and can loop.
-      for (fs::recursive_directory_iterator it{
-               root, fs::directory_options::skip_permission_denied, ec},
+      for (fs::recursive_directory_iterator
+               it{root, fs::directory_options::skip_permission_denied, ec},
            end;
-           it != end; it.increment(ec))
+           it != end;
+           it.increment(ec))
       {
         if (ec)
           break;
@@ -158,21 +160,22 @@ auto cmd_create(int argc, char** argv) -> int
   {
     std::fprintf(stderr, "uvfs: %s\n", e.what());
     for (const auto& f : e.files)
-      std::fprintf(
-          stderr, "  %s: %s\n", f.path_in_system.c_str(), f.reason.c_str());
+      std::fprintf(stderr, "  %s: %s\n", f.path_in_system.c_str(), f.reason.c_str());
     return 1;
   }
 
   for (const auto& f : w.skipped())
     std::fprintf(
-        stderr, "uvfs: skipped %s (%s)\n", f.path_in_system.c_str(),
-        f.reason.c_str());
+        stderr, "uvfs: skipped %s (%s)\n", f.path_in_system.c_str(), f.reason.c_str());
 
   std::error_code ec;
   const auto on_disk = static_cast<int64_t>(fs::file_size(archive, ec));
   std::printf(
-      "%s: %lld files, %s of content in %s (%.1f%%)\n", archive.c_str(),
-      static_cast<long long>(count), human(bytes).c_str(), human(on_disk).c_str(),
+      "%s: %lld files, %s of content in %s (%.1f%%)\n",
+      archive.c_str(),
+      static_cast<long long>(count),
+      human(bytes).c_str(),
+      human(on_disk).c_str(),
       bytes ? 100.0 * static_cast<double>(on_disk) / static_cast<double>(bytes) : 0.0);
   return 0;
 }
@@ -185,10 +188,12 @@ auto cmd_list(const std::string& archive) -> int
   {
     const auto e = r.at(i);
     std::printf(
-        "%12lld %12lld  %-9s %.*s\n", static_cast<long long>(e.size),
+        "%12lld %12lld  %-9s %.*s\n",
+        static_cast<long long>(e.size),
         static_cast<long long>(e.stored_size),
         e.storage == uvfs::stored_as::raw ? "stored" : "zstd",
-        static_cast<int>(e.path.size()), e.path.data());
+        static_cast<int>(e.path.size()),
+        e.path.data());
   }
   std::printf("%lld entries\n", static_cast<long long>(r.count()));
   return 0;
@@ -201,20 +206,20 @@ auto cmd_verify(const std::string& archive) -> int
   uvfs::reader r{archive, uvfs::integrity::index};
   if (!r.has_content_hashes())
   {
-    std::printf("%s: header and index intact (no content hashes stored)\n",
-                archive.c_str());
+    std::printf(
+        "%s: header and index intact (no content hashes stored)\n", archive.c_str());
     return 0;
   }
   const auto damaged = r.verify();
   if (damaged.empty())
   {
     std::printf(
-        "%s: header, index and all %lld payloads intact\n", archive.c_str(),
+        "%s: header, index and all %lld payloads intact\n",
+        archive.c_str(),
         static_cast<long long>(r.count()));
     return 0;
   }
-  std::fprintf(
-      stderr, "%s: %zu damaged payload(s)\n", archive.c_str(), damaged.size());
+  std::fprintf(stderr, "%s: %zu damaged payload(s)\n", archive.c_str(), damaged.size());
   for (const auto& d : damaged)
     std::fprintf(stderr, "  %s\n", d.c_str());
   return 1;
@@ -233,8 +238,10 @@ auto cmd_extract(const std::string& archive, const std::string& outdir) -> int
     if (!uvfs::is_safe_archive_path(e.path))
     {
       std::fprintf(
-          stderr, "uvfs: refusing unsafe path %.*s\n",
-          static_cast<int>(e.path.size()), e.path.data());
+          stderr,
+          "uvfs: refusing unsafe path %.*s\n",
+          static_cast<int>(e.path.size()),
+          e.path.data());
       return 1;
     }
     std::string rel{e.path};
@@ -262,42 +269,46 @@ auto cmd_extract(const std::string& archive, const std::string& outdir) -> int
     std::fclose(f);
     written++;
   }
-  std::printf("extracted %lld files to %s\n", static_cast<long long>(written),
-              outdir.c_str());
+  std::printf(
+      "extracted %lld files to %s\n", static_cast<long long>(written), outdir.c_str());
   return 0;
 }
 
 } // namespace
 
 auto main(int argc, char** argv) -> int
-try
 {
-  if (argc < 3)
+  // An inner try rather than a function-try-block: the latter is valid C++ but
+  // several static analysers cannot parse it, and this costs nothing.
+  try
   {
-    usage();
-    return 2;
-  }
-  const std::string_view cmd = argv[1];
-  if (cmd == "create")
-    return cmd_create(argc, argv);
-  if (cmd == "list")
-    return cmd_list(argv[2]);
-  if (cmd == "verify")
-    return cmd_verify(argv[2]);
-  if (cmd == "extract")
-  {
-    if (argc < 4)
+    if (argc < 3)
     {
       usage();
       return 2;
     }
-    return cmd_extract(argv[2], argv[3]);
+    const std::string_view cmd = argv[1];
+    if (cmd == "create")
+      return cmd_create(argc, argv);
+    if (cmd == "list")
+      return cmd_list(argv[2]);
+    if (cmd == "verify")
+      return cmd_verify(argv[2]);
+    if (cmd == "extract")
+    {
+      if (argc < 4)
+      {
+        usage();
+        return 2;
+      }
+      return cmd_extract(argv[2], argv[3]);
+    }
+    usage();
+    return 2;
   }
-  usage();
-  return 2;
-}
-catch (const std::exception& e)
-{
-  std::fprintf(stderr, "uvfs: %s\n", e.what());
-  return 1;
+  catch (const std::exception& e)
+  {
+    std::fprintf(stderr, "uvfs: %s\n", e.what());
+    return 1;
+  }
 }

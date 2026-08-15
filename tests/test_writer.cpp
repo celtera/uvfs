@@ -1,9 +1,8 @@
 #include "framework.hpp"
 
+#include <sys/stat.h>
 #include <uvfs/reader.hpp>
 #include <uvfs/writer.hpp>
-
-#include <sys/stat.h>
 
 #include <random>
 #include <vector>
@@ -229,8 +228,8 @@ UVFS_TEST("writer/many_threads_many_files")
     const auto leaf = "f" + std::to_string(i);
     w.add_file(
         "/" + leaf,
-        dir.make_file(leaf, static_cast<std::size_t>(i % 13) * 100,
-                      static_cast<uint64_t>(i + 1)));
+        dir.make_file(
+            leaf, static_cast<std::size_t>(i % 13) * 100, static_cast<uint64_t>(i + 1)));
   }
   const auto arc = dir / "out.uvfs";
   CHECK_NOTHROW(w.commit(arc));

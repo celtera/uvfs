@@ -18,8 +18,12 @@ UVFS_TEST("integrity/header_damage_is_always_caught")
 
   // Byte 8 onwards is covered by the hash; the magic and version are checked
   // separately and have their own tests.
-  for (std::size_t off : {hdr::flags, hdr::file_count, hdr::index_start,
-                          hdr::table_capacity, hdr::index_hash})
+  for (std::size_t off :
+       {hdr::flags,
+        hdr::file_count,
+        hdr::index_start,
+        hdr::table_capacity,
+        hdr::index_hash})
   {
     auto patched = bytes;
     patched[off] = static_cast<char>(patched[off] ^ 0x01);
@@ -39,8 +43,7 @@ UVFS_TEST("integrity/index_damage_needs_the_index_check")
   const auto bytes = slurp(arc);
   const auto h = uvfs::header::load_from(bytes.data());
 
-  const auto name_byte
-      = static_cast<std::size_t>(h.index_start + h.names_offset() + 1);
+  const auto name_byte = static_cast<std::size_t>(h.index_start + h.names_offset() + 1);
   auto patched = bytes;
   patched[name_byte] = static_cast<char>(patched[name_byte] ^ 0x20);
   const auto bad = dir / "bad.uvfs";
@@ -98,8 +101,8 @@ UVFS_TEST("integrity/intact_archive_passes_every_level")
 {
   scratch_dir dir{"clean"};
   const auto arc = build_sample(dir);
-  for (auto level : {uvfs::integrity::header_only, uvfs::integrity::index,
-                     uvfs::integrity::full})
+  for (auto level :
+       {uvfs::integrity::header_only, uvfs::integrity::index, uvfs::integrity::full})
   {
     CHECK_NOTHROW({
       uvfs::reader r{arc, level};
@@ -202,7 +205,8 @@ UVFS_TEST("integrity/mutation_sweep_with_index_checking")
     }
   }
   std::printf(
-      "    (%d/%d header+index corruptions accepted)\n", structural_accepted,
+      "    (%d/%d header+index corruptions accepted)\n",
+      structural_accepted,
       structural_total);
   CHECK_EQ(structural_accepted, 0);
 }
@@ -301,7 +305,8 @@ UVFS_TEST("integrity/dictionary_damage_is_detected")
   cs.dictionary_size = 16 * 1024;
   w.set_compression(cs);
   for (int i = 0; i < 600; i++)
-    w.add_file("/r" + std::to_string(i), dir.make_text("s" + std::to_string(i), text(i)));
+    w.add_file(
+        "/r" + std::to_string(i), dir.make_text("s" + std::to_string(i), text(i)));
   w.commit(arc);
 
   const auto pristine = slurp(arc);
@@ -327,8 +332,8 @@ UVFS_TEST("integrity/dictionary_damage_is_detected")
   for (int trial = 0; trial < 64; trial++)
   {
     auto bytes = pristine;
-    const auto off = static_cast<std::size_t>(
-        h.dict_start + (trial * 7919) % h.dict_size);
+    const auto off
+        = static_cast<std::size_t>(h.dict_start + (trial * 7919) % h.dict_size);
     bytes[off] = static_cast<char>(bytes[off] ^ (1u << (trial % 8)));
     if (bytes == pristine)
       continue;
@@ -357,8 +362,10 @@ UVFS_TEST("integrity/dictionary_damage_is_detected")
     }
   }
   std::printf(
-      "    (%d silently wrong, %d detected, %d unaffected)\n", silently_wrong,
-      detected, unaffected);
+      "    (%d silently wrong, %d detected, %d unaffected)\n",
+      silently_wrong,
+      detected,
+      unaffected);
 
   // Damage must never turn into wrong bytes handed back as if they were right.
   CHECK_EQ(silently_wrong, 0);
@@ -390,9 +397,12 @@ UVFS_TEST("integrity/corrupt_orig_size_does_not_drive_a_huge_allocation")
   CHECK(uvfs::load<uint8_t>(pristine.data() + e0 + ent::method) != 0);
 
   // Sizes far beyond anything the stored bytes could possibly expand to.
-  const int64_t absurd[] = {
-      int64_t{1} << 62, int64_t{1} << 48, int64_t{1} << 40,
-      0x29000000000300e8LL, std::numeric_limits<int64_t>::max()};
+  const int64_t absurd[]
+      = {int64_t{1} << 62,
+         int64_t{1} << 48,
+         int64_t{1} << 40,
+         0x29000000000300e8LL,
+         std::numeric_limits<int64_t>::max()};
 
   for (auto v : absurd)
   {

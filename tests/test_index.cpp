@@ -55,8 +55,7 @@ UVFS_TEST("index/lookup_survives_hash_collisions_and_probing")
   names.reserve(n);
   for (int i = 0; i < n; i++)
   {
-    names.push_back(
-        "/very/long/shared/prefix/that/repeats/entry-" + std::to_string(i));
+    names.push_back("/very/long/shared/prefix/that/repeats/entry-" + std::to_string(i));
     w.add_file(names.back(), shared);
   }
   const auto arc = dir / "out.uvfs";
@@ -93,8 +92,8 @@ UVFS_TEST("index/lookup_of_absent_key_terminates")
 
 UVFS_TEST("index/table_capacity_matches_load_factor")
 {
-  for (int64_t n : {int64_t{0}, int64_t{1}, int64_t{5}, int64_t{6}, int64_t{100},
-                    int64_t{1000}})
+  for (int64_t n :
+       {int64_t{0}, int64_t{1}, int64_t{5}, int64_t{6}, int64_t{100}, int64_t{1000}})
   {
     const auto cap = uvfs::table_capacity_for(n);
     if (n == 0)
@@ -259,7 +258,8 @@ UVFS_TEST("index/open_cost_does_not_scale_with_entry_count")
   CHECK_EQ(large_n, int64_t{50000});
 
   std::printf(
-      "    (open cost: %ld KB for 100 entries, %ld KB for 50000)\n", small_cost,
+      "    (open cost: %ld KB for 100 entries, %ld KB for 50000)\n",
+      small_cost,
       large_cost);
 
   // v1 built a heap hash map here: 50000 entries at ~40 bytes plus table

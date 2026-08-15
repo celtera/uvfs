@@ -2,6 +2,7 @@
 #include "config.hpp"
 
 #include <cstdint>
+
 #include <string_view>
 
 namespace uvfs
@@ -65,8 +66,8 @@ enum class path_problem
   return "unknown problem";
 }
 
-[[nodiscard]] constexpr auto check_archive_path(std::string_view p) noexcept
-    -> path_problem
+[[nodiscard]] constexpr auto
+check_archive_path(std::string_view p) noexcept -> path_problem
 {
   if (p.empty())
     return path_problem::empty;

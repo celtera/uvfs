@@ -18,15 +18,13 @@ struct run_result
 
 //! Runs one commit into a tmpfs of the given size, inside a private mount
 //! namespace, so the destination filesystem fills up part way through.
-auto commit_into_small_fs(const char* mode, int fs_mb, int count, int kb)
-    -> run_result
+auto commit_into_small_fs(const char* mode, int fs_mb, int count, int kb) -> run_result
 {
-  const std::string script = std::string{"set -e; "}
-                             + "MNT=/tmp/uvfs-smallfs-$$; mkdir -p $MNT; "
-                             + "mount -t tmpfs -o size=" + std::to_string(fs_mb)
-                             + "m tmpfs $MNT; " + UVFS_ENOSPC_HELPER + " " + mode
-                             + " $MNT " + std::to_string(count) + " "
-                             + std::to_string(kb);
+  const std::string script
+      = std::string{"set -e; "} + "MNT=/tmp/uvfs-smallfs-$$; mkdir -p $MNT; "
+        + "mount -t tmpfs -o size=" + std::to_string(fs_mb) + "m tmpfs $MNT; "
+        + UVFS_ENOSPC_HELPER + " " + mode + " $MNT " + std::to_string(count) + " "
+        + std::to_string(kb);
   const std::string cmd = "unshare -Urm sh -c '" + script + "' 2>&1";
 
   run_result r;
@@ -88,7 +86,10 @@ UVFS_TEST("enospc/running_out_of_space_is_an_error_not_a_crash")
   {
     const auto r = commit_into_small_fs(mode, 4, 2000, 20);
     std::printf(
-        "    %-7s signal=%d exit=%d :: %s", mode, r.signal, r.exit_code,
+        "    %-7s signal=%d exit=%d :: %s",
+        mode,
+        r.signal,
+        r.exit_code,
         r.output.empty() ? "(no output)\n" : r.output.c_str());
 
     CHECK_EQ(r.signal, 0);

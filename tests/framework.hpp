@@ -1,17 +1,19 @@
 #pragma once
 // A very small test framework: no dependencies, registers tests through static
 // initialisers, and reports every failure rather than stopping at the first.
+#include <unistd.h>
+
 #include <atomic>
 #include <cstdio>
-#include <unistd.h>
 #include <cstring>
 #include <exception>
 #include <filesystem>
 #include <functional>
 #include <random>
 #include <string>
-#include <string_view>
 #include <vector>
+
+#include <string_view>
 
 namespace uvfs::test
 {
@@ -42,13 +44,11 @@ inline auto checks() -> int&
 
 struct registrar
 {
-  registrar(const char* name, void (*fn)())
-  {
-    registry().push_back({name, fn});
-  }
+  registrar(const char* name, void (*fn)()) { registry().push_back({name, fn}); }
 };
 
-inline void report(bool ok, const char* file, int line, const char* expr, const std::string& detail)
+inline void
+report(bool ok, const char* file, int line, const char* expr, const std::string& detail)
 {
   checks()++;
   if (ok)
@@ -88,12 +88,13 @@ struct scratch_dir
   {
     std::error_code ec;
     std::filesystem::permissions(
-        path, std::filesystem::perms::owner_all,
-        std::filesystem::perm_options::add, ec);
+        path, std::filesystem::perms::owner_all, std::filesystem::perm_options::add, ec);
     for (auto& e : std::filesystem::recursive_directory_iterator(path, ec))
       std::filesystem::permissions(
-          e.path(), std::filesystem::perms::owner_all,
-          std::filesystem::perm_options::add, ec);
+          e.path(),
+          std::filesystem::perms::owner_all,
+          std::filesystem::perm_options::add,
+          ec);
     std::filesystem::remove_all(path, ec);
   }
   scratch_dir(const scratch_dir&) = delete;
@@ -105,8 +106,8 @@ struct scratch_dir
   }
 
   // Creates a file of `n` deterministic pseudo-random bytes.
-  auto make_file(std::string_view leaf, std::size_t n, uint64_t seed = 1) const
-      -> std::string
+  auto
+  make_file(std::string_view leaf, std::size_t n, uint64_t seed = 1) const -> std::string
   {
     auto p = path / leaf;
     std::filesystem::create_directories(p.parent_path());
@@ -152,7 +153,10 @@ inline auto current_rss_kb() -> long
   return resident * (sysconf(_SC_PAGESIZE) / 1024);
 }
 
-inline auto have_current_rss() -> bool { return current_rss_kb() >= 0; }
+inline auto have_current_rss() -> bool
+{
+  return current_rss_kb() >= 0;
+}
 
 inline auto expected_bytes(std::size_t n, uint64_t seed = 1) -> std::string
 {
@@ -168,55 +172,65 @@ inline auto expected_bytes(std::size_t n, uint64_t seed = 1) -> std::string
 #define UVFS_CAT_(a, b) a##b
 #define UVFS_CAT(a, b) UVFS_CAT_(a, b)
 
-#define UVFS_TEST(name)                                                            \
-  static void UVFS_CAT(uvfs_test_fn_, __LINE__)();                                 \
-  static const ::uvfs::test::registrar UVFS_CAT(uvfs_test_reg_, __LINE__){         \
-      name, &UVFS_CAT(uvfs_test_fn_, __LINE__)};                                   \
+#define UVFS_TEST(name)                                                    \
+  static void UVFS_CAT(uvfs_test_fn_, __LINE__)();                         \
+  static const ::uvfs::test::registrar UVFS_CAT(uvfs_test_reg_, __LINE__){ \
+      name, &UVFS_CAT(uvfs_test_fn_, __LINE__)};                           \
   static void UVFS_CAT(uvfs_test_fn_, __LINE__)()
 
-#define CHECK(...) ::uvfs::test::report(!!(__VA_ARGS__), __FILE__, __LINE__, #__VA_ARGS__, {})
+#define CHECK(...) \
+  ::uvfs::test::report(!!(__VA_ARGS__), __FILE__, __LINE__, #__VA_ARGS__, {})
 
-#define CHECK_EQ(a, b)                                                             \
-  do                                                                               \
-  {                                                                                \
-    const auto& uvfs_a_ = (a);                                                     \
-    const auto& uvfs_b_ = (b);                                                     \
-    ::uvfs::test::report(                                                          \
-        uvfs_a_ == uvfs_b_, __FILE__, __LINE__, #a " == " #b,                      \
-        "got " + ::uvfs::test::show(uvfs_a_) + ", want "                           \
-            + ::uvfs::test::show(uvfs_b_));                                        \
+#define CHECK_EQ(a, b)                                   \
+  do                                                     \
+  {                                                      \
+    const auto& uvfs_a_ = (a);                           \
+    const auto& uvfs_b_ = (b);                           \
+    ::uvfs::test::report(                                \
+        uvfs_a_ == uvfs_b_,                              \
+        __FILE__,                                        \
+        __LINE__,                                        \
+        #a " == " #b,                                    \
+        "got " + ::uvfs::test::show(uvfs_a_) + ", want " \
+            + ::uvfs::test::show(uvfs_b_));              \
   } while (0)
 
-#define CHECK_THROWS(...)                                                         \
-  do                                                                               \
-  {                                                                                \
-    bool uvfs_threw_ = false;                                                      \
-    try                                                                            \
-    {                                                                              \
-      __VA_ARGS__;                                                                 \
-    }                                                                              \
-    catch (const std::exception&)                                                  \
-    {                                                                              \
-      uvfs_threw_ = true;                                                          \
-    }                                                                              \
-    ::uvfs::test::report(                                                          \
-        uvfs_threw_, __FILE__, __LINE__, #__VA_ARGS__ " throws",                          \
-        uvfs_threw_ ? "" : "no exception was thrown");                             \
+#define CHECK_THROWS(...)                              \
+  do                                                   \
+  {                                                    \
+    bool uvfs_threw_ = false;                          \
+    try                                                \
+    {                                                  \
+      __VA_ARGS__;                                     \
+    }                                                  \
+    catch (const std::exception&)                      \
+    {                                                  \
+      uvfs_threw_ = true;                              \
+    }                                                  \
+    ::uvfs::test::report(                              \
+        uvfs_threw_,                                   \
+        __FILE__,                                      \
+        __LINE__,                                      \
+        #__VA_ARGS__ " throws",                        \
+        uvfs_threw_ ? "" : "no exception was thrown"); \
   } while (0)
 
-#define CHECK_NOTHROW(...)                                                        \
-  do                                                                               \
-  {                                                                                \
-    std::string uvfs_err_;                                                         \
-    try                                                                            \
-    {                                                                              \
-      __VA_ARGS__;                                                                 \
-    }                                                                              \
-    catch (const std::exception& e)                                                \
-    {                                                                              \
-      uvfs_err_ = e.what();                                                        \
-    }                                                                              \
-    ::uvfs::test::report(                                                          \
-        uvfs_err_.empty(), __FILE__, __LINE__, #__VA_ARGS__ " does not throw",            \
-        uvfs_err_.empty() ? "" : "threw: " + uvfs_err_);                           \
+#define CHECK_NOTHROW(...)                               \
+  do                                                     \
+  {                                                      \
+    std::string uvfs_err_;                               \
+    try                                                  \
+    {                                                    \
+      __VA_ARGS__;                                       \
+    }                                                    \
+    catch (const std::exception& e)                      \
+    {                                                    \
+      uvfs_err_ = e.what();                              \
+    }                                                    \
+    ::uvfs::test::report(                                \
+        uvfs_err_.empty(),                               \
+        __FILE__,                                        \
+        __LINE__,                                        \
+        #__VA_ARGS__ " does not throw",                  \
+        uvfs_err_.empty() ? "" : "threw: " + uvfs_err_); \
   } while (0)

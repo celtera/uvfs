@@ -75,7 +75,7 @@ public:
   //! Chooses whether and how payloads are compressed. Default: no compression.
   //! Throws std::runtime_error if compression is asked for and this build has
   //! no zstd support.
-  void set_compression(compression_settings settings);
+  void set_compression(const compression_settings& settings);
 
   //! Store a content hash per entry so readers can detect a damaged payload.
   //! Costs 8 bytes per file and one extra pass over data that is already in

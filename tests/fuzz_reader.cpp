@@ -11,6 +11,7 @@
 //   cmake -DUVFS_BUILD_FUZZERS=ON -DUVFS_SANITIZE=address,undefined \
 //         -DCMAKE_CXX_COMPILER=clang++
 //   ./uvfs_fuzz_reader corpus/ -max_total_time=300
+#include <unistd.h>
 #include <uvfs/reader.hpp>
 
 #include <cstdint>
@@ -18,7 +19,6 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
-#include <unistd.h>
 
 namespace
 {
@@ -27,9 +27,8 @@ namespace
 //! from dominating the run.
 auto scratch_path() -> const std::string&
 {
-  static const std::string p = [] {
-    return "/tmp/uvfs-fuzz-" + std::to_string(::getpid()) + ".uvfs";
-  }();
+  static const std::string p
+      = [] { return "/tmp/uvfs-fuzz-" + std::to_string(::getpid()) + ".uvfs"; }();
   return p;
 }
 } // namespace

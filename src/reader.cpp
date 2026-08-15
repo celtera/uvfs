@@ -6,8 +6,8 @@
 #include <uvfs/reader.hpp>
 
 #include <cassert>
-#include <mutex>
 #include <cstring>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 
@@ -63,8 +63,7 @@ struct reader::impl
 
     if (e.data_offset < 0 || e.stored_size < 0 || e.orig_size < 0)
       return false;
-    if (e.data_offset > h.data_size
-        || e.stored_size > h.data_size - e.data_offset)
+    if (e.data_offset > h.data_size || e.stored_size > h.data_size - e.data_offset)
       return false;
 
     switch (e.method)
@@ -101,8 +100,8 @@ struct reader::impl
     if (check != integrity::full || !hashes)
       return;
     const auto want = load<uint64_t>(hashes + i * 8);
-    const auto got = hash_bytes(
-        payloads + e.data_offset, static_cast<std::size_t>(e.stored_size));
+    const auto got
+        = hash_bytes(payloads + e.data_offset, static_cast<std::size_t>(e.stored_size));
     if (got != want)
       throw std::runtime_error(
           "uvfs: content checksum mismatch for " + std::string{name}
@@ -130,9 +129,9 @@ struct reader::impl
       return; // nothing to cross-check against; the ratio bound still applies
     if (static_cast<int64_t>(declared) != e.orig_size)
       throw std::runtime_error(
-          "uvfs: index says " + std::string{name} + " is "
-          + std::to_string(e.orig_size) + " bytes but its frame declares "
-          + std::to_string(declared) + " (corrupt index)");
+          "uvfs: index says " + std::string{name} + " is " + std::to_string(e.orig_size)
+          + " bytes but its frame declares " + std::to_string(declared)
+          + " (corrupt index)");
 #else
     (void)name;
 #endif
@@ -210,8 +209,7 @@ try : impl{std::make_unique<struct impl>(path)}
   // region in the file is located through these 128 bytes. It covers 120
   // bytes, so it is free, and therefore not optional.
   if (impl->h.header_hash != hash_bytes(base, header::hashed_prefix))
-    throw std::runtime_error(
-        "uvfs: header checksum mismatch, the file is damaged: ");
+    throw std::runtime_error("uvfs: header checksum mismatch, the file is damaged: ");
 
   impl->h.validate(filesize);
 
@@ -221,8 +219,7 @@ try : impl{std::make_unique<struct impl>(path)}
   impl->index = base + h.index_start;
   impl->entries = impl->index;
   impl->table = impl->index + h.table_offset();
-  impl->hashes
-      = h.has(flag_entry_hashes) ? impl->index + h.hashes_offset() : nullptr;
+  impl->hashes = h.has(flag_entry_hashes) ? impl->index + h.hashes_offset() : nullptr;
   impl->names = impl->index + h.names_offset();
   impl->payloads = base + h.data_start;
 
@@ -250,8 +247,8 @@ try : impl{std::make_unique<struct impl>(path)}
       throw std::runtime_error(
           "uvfs: dictionary checksum mismatch, the archive is damaged: ");
 
-    impl->ddict.reset(ZSTD_createDDict(
-        base + h.dict_start, static_cast<std::size_t>(h.dict_size)));
+    impl->ddict.reset(
+        ZSTD_createDDict(base + h.dict_start, static_cast<std::size_t>(h.dict_size)));
     if (!impl->ddict)
       throw std::runtime_error("uvfs: could not load the archive dictionary: ");
 #else
@@ -348,12 +345,11 @@ void reader::for_each_file(function_ref<bool(iter_entry)> func) const
     const entry e = impl->checked_entry_at(i);
     const auto name = impl->name_at(e);
     impl->verify_payload(i, e, name);
-    const auto bytes
-        = e.method == codec::store
-              ? byte_array(
-                    impl->payloads + e.data_offset,
-                    static_cast<std::size_t>(e.stored_size))
-              : byte_array{};
+    const auto bytes = e.method == codec::store
+                           ? byte_array(
+                                 impl->payloads + e.data_offset,
+                                 static_cast<std::size_t>(e.stored_size))
+                           : byte_array{};
     if (!func(iter_entry{name, bytes}))
       break;
   }
@@ -383,8 +379,7 @@ auto reader::read_into(std::string_view path, char* out, int64_t capacity) const
   }
 
 #if defined(UVFS_HAS_ZSTD)
-  const ZSTD_DDict* dict
-      = (e.method == codec::zstd_dict) ? impl->ddict.get() : nullptr;
+  const ZSTD_DDict* dict = (e.method == codec::zstd_dict) ? impl->ddict.get() : nullptr;
   if (e.method == codec::zstd_dict && !dict)
     throw std::runtime_error(
         "uvfs: " + std::string{path}
@@ -392,8 +387,7 @@ auto reader::read_into(std::string_view path, char* out, int64_t capacity) const
   {
     const std::lock_guard lock{impl->codec_mutex};
     impl->decompressor.decompress(
-        out, e.orig_size, impl->payloads + e.data_offset, e.stored_size, dict,
-        path);
+        out, e.orig_size, impl->payloads + e.data_offset, e.stored_size, dict, path);
   }
   return e.orig_size;
 #else

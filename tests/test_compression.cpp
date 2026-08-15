@@ -126,8 +126,7 @@ UVFS_TEST("compression/automatic_declines_on_incompressible_data")
     {
       CHECK(*mapped == media);
       CHECK_EQ(
-          reinterpret_cast<std::uintptr_t>(mapped->data()) % 64u,
-          std::uintptr_t{0});
+          reinterpret_cast<std::uintptr_t>(mapped->data()) % 64u, std::uintptr_t{0});
     }
   }
 
@@ -221,7 +220,8 @@ UVFS_TEST("compression/shrinks_a_text_corpus")
   const auto packed_size = std::filesystem::file_size(b);
   std::printf(
       "    (plain %zu bytes, compressed %zu bytes)\n",
-      static_cast<std::size_t>(plain_size), static_cast<std::size_t>(packed_size));
+      static_cast<std::size_t>(plain_size),
+      static_cast<std::size_t>(packed_size));
   CHECK(packed_size < plain_size / 2);
 
   // ...and it still reads back exactly.
@@ -252,8 +252,10 @@ UVFS_TEST("compression/dictionary_helps_many_small_files")
     for (int i = 0; i < 2000; i++)
       w.add_file(
           "/f" + std::to_string(i),
-          write_blob(dir, "s" + std::to_string(i),
-                     compressible(300, static_cast<uint64_t>(i))));
+          write_blob(
+              dir,
+              "s" + std::to_string(i),
+              compressible(300, static_cast<uint64_t>(i))));
     const auto arc = dir / name;
     w.commit(arc);
     return arc;
@@ -265,7 +267,8 @@ UVFS_TEST("compression/dictionary_helps_many_small_files")
   const auto b = std::filesystem::file_size(with);
   std::printf(
       "    (no dictionary %zu bytes, with dictionary %zu bytes)\n",
-      static_cast<std::size_t>(a), static_cast<std::size_t>(b));
+      static_cast<std::size_t>(a),
+      static_cast<std::size_t>(b));
   CHECK(b < a);
 
   // The dictionary lives in the archive, so reading needs nothing extra.
@@ -326,9 +329,11 @@ UVFS_TEST("compression/output_is_reproducible")
     for (int i = 0; i < 400; i++)
       w.add_file(
           "/f" + std::to_string(i),
-          write_blob(dir, "s" + std::to_string(i),
-                     (i % 3) ? compressible(3000, static_cast<uint64_t>(i))
-                             : incompressible(3000, static_cast<uint64_t>(i))));
+          write_blob(
+              dir,
+              "s" + std::to_string(i),
+              (i % 3) ? compressible(3000, static_cast<uint64_t>(i))
+                      : incompressible(3000, static_cast<uint64_t>(i))));
     const auto arc = dir / name;
     w.commit(arc);
     return slurp(arc);

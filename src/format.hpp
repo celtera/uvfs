@@ -6,6 +6,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+
 #include <type_traits>
 
 // uvfs format, version 2
@@ -91,16 +92,20 @@ static constexpr auto round_up(int64_t x, int64_t multiple) noexcept -> int64_t
   return static_cast<int64_t>(((static_cast<uint64_t>(x) + m - 1) / m) * m);
 }
 
+// The arithmetic is done unsigned so that rounding cannot overflow into
+// undefined behaviour; the result is back in range by construction.
+// NOLINTNEXTLINE(bugprone-narrowing-conversions)
 [[nodiscard]]
 static constexpr auto round_up_8(int64_t x) noexcept -> int64_t
 {
-  return ((static_cast<uint64_t>(x) + 7) >> 3) << 3;
+  return static_cast<int64_t>(((static_cast<uint64_t>(x) + 7) >> 3) << 3);
 }
 
+// NOLINTNEXTLINE(bugprone-narrowing-conversions)
 [[nodiscard]]
 static constexpr auto round_up_64(int64_t x) noexcept -> int64_t
 {
-  return ((static_cast<uint64_t>(x) + 63) >> 6) << 6;
+  return static_cast<int64_t>(((static_cast<uint64_t>(x) + 63) >> 6) << 6);
 }
 
 //! Smallest power of two that keeps the load factor at or below 70%.
@@ -115,7 +120,7 @@ static constexpr auto table_capacity_for(int64_t n) noexcept -> int64_t
   return cap;
 }
 
-template<typename T>
+template <typename T>
 static constexpr int64_t ssizeof = static_cast<int64_t>(sizeof(T));
 
 // Reads a scalar out of the mapping without assuming anything about the
@@ -123,7 +128,7 @@ static constexpr int64_t ssizeof = static_cast<int64_t>(sizeof(T));
 // offset, and forming a misaligned pointer there is undefined behaviour even
 // on architectures where the load itself would have worked. Compilers lower
 // this to a plain load when the target allows it.
-template<typename T>
+template <typename T>
 [[nodiscard]] inline auto load(const char* p) noexcept -> T
 {
   static_assert(std::is_trivially_copyable_v<T>);
@@ -132,7 +137,7 @@ template<typename T>
   return v;
 }
 
-template<typename T>
+template <typename T>
 inline void store(char* p, T v) noexcept
 {
   static_assert(std::is_trivially_copyable_v<T>);
@@ -142,9 +147,9 @@ inline void store(char* p, T v) noexcept
 //! One index entry. Fixed stride so the array is directly indexable.
 struct entry
 {
-  int64_t data_offset{}; //!< relative to header::data_start
-  int64_t stored_size{}; //!< bytes occupied in the archive
-  int64_t orig_size{};   //!< bytes after decompression
+  int64_t data_offset{};  //!< relative to header::data_start
+  int64_t stored_size{};  //!< bytes occupied in the archive
+  int64_t orig_size{};    //!< bytes after decompression
   uint32_t name_offset{}; //!< offset into the name blob
   uint16_t name_size{};
   codec method{codec::store};
@@ -257,10 +262,7 @@ struct header
   {
     return file_count * entry_size;
   }
-  [[nodiscard]] auto table_offset() const noexcept -> int64_t
-  {
-    return entries_bytes();
-  }
+  [[nodiscard]] auto table_offset() const noexcept -> int64_t { return entries_bytes(); }
   [[nodiscard]] auto table_bytes() const noexcept -> int64_t
   {
     return table_capacity * 8;
@@ -297,8 +299,7 @@ struct header
     if (version() != format_version)
       throw std::runtime_error(
           "uvfs: unsupported format version " + std::to_string(version())
-          + " (this build reads version " + std::to_string(format_version)
-          + "): ");
+          + " (this build reads version " + std::to_string(format_version) + "): ");
   }
 
   void validate(int64_t filesize) const
@@ -345,8 +346,8 @@ struct header
 
     // The index sub-regions must fit inside the index, in order.
     // file_count is bounded above, so these products cannot overflow.
-    const auto need = static_cast<uint64_t>(names_offset())
-                      + static_cast<uint64_t>(names_size);
+    const auto need
+        = static_cast<uint64_t>(names_offset()) + static_cast<uint64_t>(names_size);
     if (need > idx_sz)
       throw std::runtime_error(
           "uvfs: index is too small for its entries, table and names: ");
@@ -373,8 +374,7 @@ struct header
     }
     else if (dict_size != 0)
     {
-      throw std::runtime_error(
-          "uvfs: dictionary present but the flag is not set: ");
+      throw std::runtime_error("uvfs: dictionary present but the flag is not set: ");
     }
   }
 };

@@ -3,9 +3,8 @@
 // signal rather than taking the test suite down with it.
 //
 //   oom_commit <limit-mb> <workdir> <file-count> <file-mb> <threads>
-#include <uvfs/writer.hpp>
-
 #include <sys/resource.h>
+#include <uvfs/writer.hpp>
 
 #include <cstdio>
 #include <cstdlib>
@@ -43,7 +42,10 @@ auto main(int argc, char** argv) -> int
 
   // Applied after the inputs exist so the limit constrains the commit only.
   const rlim_t bytes = static_cast<rlim_t>(limit_mb) * 1024 * 1024;
-  struct rlimit rl{bytes, bytes};
+  struct rlimit rl
+  {
+    bytes, bytes
+  };
   if (setrlimit(RLIMIT_AS, &rl) != 0)
     return 3;
 

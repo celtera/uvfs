@@ -1,15 +1,16 @@
 #pragma once
 
-#include <stdexcept>
-#include <string>
-#include <string_view>
-
-#include <cerrno>
-#include <cstring>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#include <cerrno>
+#include <cstring>
+#include <stdexcept>
+#include <string>
+
+#include <string_view>
 
 namespace uvfs
 {
@@ -49,13 +50,17 @@ namespace detail
   return msg;
 }
 
-template<typename T>
+template <typename T>
 struct mmap_handle
 {
   T bytes{};
   int64_t sz{};
 
-  mmap_handle(T b, int64_t size): bytes{b}, sz{size} { }
+  mmap_handle(T b, int64_t size)
+      : bytes{b}
+      , sz{size}
+  {
+  }
   mmap_handle() = default;
   mmap_handle(const mmap_handle&) = delete;
   auto operator=(const mmap_handle&) -> mmap_handle& = delete;
@@ -96,8 +101,7 @@ public:
   {
     const int handle = open(path, O_RDONLY | O_CLOEXEC);
     if (handle == -1)
-      throw std::runtime_error(
-          "uvfs: could not open (" + errno_string(errno) + "): ");
+      throw std::runtime_error("uvfs: could not open (" + errno_string(errno) + "): ");
     return fd_handle{handle};
   }
 
@@ -105,8 +109,7 @@ public:
   {
     const int handle = open(path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
     if (handle == -1)
-      throw std::runtime_error(
-          "uvfs: could not create (" + errno_string(errno) + "): ");
+      throw std::runtime_error("uvfs: could not create (" + errno_string(errno) + "): ");
     return fd_handle{handle};
   }
 
@@ -115,18 +118,18 @@ public:
   [[nodiscard]]
   auto filesize() const -> int64_t
   {
-    struct stat st{};
+    struct stat st
+    {
+    };
     if (fstat(handle, &st))
-      throw std::runtime_error(
-          "uvfs: could not stat (" + errno_string(errno) + "): ");
+      throw std::runtime_error("uvfs: could not stat (" + errno_string(errno) + "): ");
     return st.st_size;
   }
 
   void resize(int64_t size) const
   {
     if (ftruncate(handle, size))
-      throw std::runtime_error(
-          "uvfs: could not resize (" + errno_string(errno) + "): ");
+      throw std::runtime_error("uvfs: could not resize (" + errno_string(errno) + "): ");
   }
 
   // Reserves blocks so that running out of space is reported here, as an
@@ -160,8 +163,7 @@ public:
   void sync() const
   {
     if (fsync(handle) != 0)
-      throw std::runtime_error(
-          "uvfs: could not flush (" + errno_string(errno) + "): ");
+      throw std::runtime_error("uvfs: could not flush (" + errno_string(errno) + "): ");
   }
 
   [[nodiscard]]
@@ -172,8 +174,7 @@ public:
     const auto* data
         = static_cast<const char*>(mmap(nullptr, sz, PROT_READ, MAP_PRIVATE, handle, 0));
     if (data == MAP_FAILED)
-      throw std::runtime_error(
-          "uvfs: could not map (" + errno_string(errno) + "): ");
+      throw std::runtime_error("uvfs: could not map (" + errno_string(errno) + "): ");
 
     return mmap_handle<const char*>{data, sz};
   }
@@ -186,8 +187,7 @@ public:
     auto* data = static_cast<char*>(
         mmap(nullptr, sz, PROT_READ | PROT_WRITE, MAP_FILE | MAP_SHARED, handle, 0));
     if (data == MAP_FAILED)
-      throw std::runtime_error(
-          "uvfs: could not map (" + errno_string(errno) + "): ");
+      throw std::runtime_error("uvfs: could not map (" + errno_string(errno) + "): ");
 
     return mmap_handle<char*>{data, sz};
   }

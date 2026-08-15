@@ -8,8 +8,7 @@ auto main(int argc, char** argv) -> int
   std::string filter = argc > 1 ? argv[1] : "";
 
   auto& all = registry();
-  std::sort(
-      all.begin(), all.end(), [](auto& a, auto& b) { return a.name < b.name; });
+  std::sort(all.begin(), all.end(), [](auto& a, auto& b) { return a.name < b.name; });
 
   int ran = 0;
   for (auto& c : all)
@@ -37,7 +36,6 @@ auto main(int argc, char** argv) -> int
       std::printf("    ^^ %s FAILED\n", c.name.c_str());
   }
 
-  std::printf(
-      "\n%d test(s), %d check(s), %d failure(s)\n", ran, checks(), failures());
+  std::printf("\n%d test(s), %d check(s), %d failure(s)\n", ran, checks(), failures());
   return failures() == 0 ? 0 : 1;
 }

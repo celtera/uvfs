@@ -4,8 +4,8 @@
 #include <uvfs/reader.hpp>
 #include <uvfs/writer.hpp>
 
-#include <fstream>
 #include <cstdlib>
+#include <fstream>
 #include <limits>
 
 using namespace uvfs::test;
@@ -13,15 +13,28 @@ using namespace uvfs::test;
 UVFS_TEST("path/accepts_ordinary_names")
 {
   for (std::string_view p :
-       {"/a", "a", "/a/b/c.txt", "a/b", "/deep/ly/nes/ted/file.bin",
-        "/name with spaces", "/naïve-utf8-é", "/a..b", "/..a", "/a..",
-        "/...", "/file.tar.gz"})
+       {"/a",
+        "a",
+        "/a/b/c.txt",
+        "a/b",
+        "/deep/ly/nes/ted/file.bin",
+        "/name with spaces",
+        "/naïve-utf8-é",
+        "/a..b",
+        "/..a",
+        "/a..",
+        "/...",
+        "/file.tar.gz"})
     CHECK(uvfs::is_safe_archive_path(p));
 }
 
 UVFS_TEST("path/rejects_traversal_and_malformed")
 {
-  struct { std::string_view path; uvfs::path_problem want; } cases[] = {
+  struct
+  {
+    std::string_view path;
+    uvfs::path_problem want;
+  } cases[] = {
       {"", uvfs::path_problem::empty},
       {"/", uvfs::path_problem::empty_component},
       {"//a", uvfs::path_problem::empty_component},
@@ -141,10 +154,12 @@ UVFS_TEST("path/replace_keeps_registration_order_stable")
   uvfs::writer w;
   w.set_duplicate_policy(uvfs::on_duplicate::replace);
   for (int i = 0; i < 50; i++)
-    w.add_file("/f" + std::to_string(i), dir.make_file("f" + std::to_string(i), 8, i + 1));
+    w.add_file(
+        "/f" + std::to_string(i), dir.make_file("f" + std::to_string(i), 8, i + 1));
   // re-register a few, last one wins
   for (int i : {3, 17, 42})
-    w.add_file("/f" + std::to_string(i), dir.make_file("z" + std::to_string(i), 24, 900 + i));
+    w.add_file(
+        "/f" + std::to_string(i), dir.make_file("z" + std::to_string(i), 24, 900 + i));
   w.commit(arc);
 
   uvfs::reader r{arc};
@@ -236,8 +251,11 @@ UVFS_TEST("path/oversized_name_blob_is_refused")
     w.add_file(name, src);
   }
   std::printf(
-      "    (%d paths of %zu bytes = %.2f GiB of names)\n", count, path_len,
-      static_cast<double>(count) * static_cast<double>(path_len) / (1024.0 * 1024 * 1024));
+      "    (%d paths of %zu bytes = %.2f GiB of names)\n",
+      count,
+      path_len,
+      static_cast<double>(count) * static_cast<double>(path_len)
+          / (1024.0 * 1024 * 1024));
 
   bool refused = false;
   std::string message;

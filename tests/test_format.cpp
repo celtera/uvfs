@@ -10,7 +10,6 @@
 
 using namespace uvfs::test;
 
-
 // -------------------------------------------------------------------- R1
 UVFS_TEST("format/last_payload_ending_exactly_at_eof")
 {
@@ -51,8 +50,7 @@ UVFS_TEST("format/every_payload_size_class_roundtrips")
   for (auto sz : sizes)
   {
     w.add_file(
-        "/f" + std::to_string(i),
-        dir.make_file("f" + std::to_string(i), sz, sz + 7));
+        "/f" + std::to_string(i), dir.make_file("f" + std::to_string(i), sz, sz + 7));
     i++;
   }
   const auto arc = dir / "out.uvfs";
@@ -132,11 +130,12 @@ UVFS_TEST("format/rejects_corrupt_entry_offsets")
   auto bytes = slurp(arc);
 
   const auto e0 = entry_offset(bytes, 0);
-  const std::size_t fields[]
-      = {ent::data_offset, ent::stored_size, ent::orig_size};
-  const int64_t values[] = {
-      -1, int64_t{1} << 40, std::numeric_limits<int64_t>::max(),
-      std::numeric_limits<int64_t>::min()};
+  const std::size_t fields[] = {ent::data_offset, ent::stored_size, ent::orig_size};
+  const int64_t values[]
+      = {-1,
+         int64_t{1} << 40,
+         std::numeric_limits<int64_t>::max(),
+         std::numeric_limits<int64_t>::min()};
   for (auto f : fields)
     for (auto v : values)
     {
@@ -164,14 +163,23 @@ UVFS_TEST("format/rejects_corrupt_header_fields")
   const auto arc = build_sample(dir);
   auto bytes = slurp(arc);
 
-  const std::size_t fields[] = {
-      hdr::file_size,  hdr::file_count, hdr::index_start,    hdr::index_size,
-      hdr::data_start, hdr::data_size,  hdr::table_capacity, hdr::names_size};
+  const std::size_t fields[]
+      = {hdr::file_size,
+         hdr::file_count,
+         hdr::index_start,
+         hdr::index_size,
+         hdr::data_start,
+         hdr::data_size,
+         hdr::table_capacity,
+         hdr::names_size};
 
   // Values that break a header invariant outright: the header check alone has
   // to refuse these, before a single entry is touched.
-  const int64_t impossible[] = {-1, std::numeric_limits<int64_t>::max(),
-                                std::numeric_limits<int64_t>::min(), 1LL << 50};
+  const int64_t impossible[]
+      = {-1,
+         std::numeric_limits<int64_t>::max(),
+         std::numeric_limits<int64_t>::min(),
+         1LL << 50};
   for (auto off : fields)
     for (auto v : impossible)
     {
@@ -250,8 +258,14 @@ UVFS_TEST("format/rejects_truncated_files")
   const auto bytes = slurp(arc);
 
   for (std::size_t keep :
-       {std::size_t{0}, std::size_t{1}, std::size_t{63}, std::size_t{64},
-        std::size_t{127}, std::size_t{128}, bytes.size() / 2, bytes.size() - 1})
+       {std::size_t{0},
+        std::size_t{1},
+        std::size_t{63},
+        std::size_t{64},
+        std::size_t{127},
+        std::size_t{128},
+        bytes.size() / 2,
+        bytes.size() - 1})
   {
     std::vector<char> cut(bytes.begin(), bytes.begin() + static_cast<long>(keep));
     const auto bad = dir / "cut.uvfs";
@@ -278,9 +292,8 @@ UVFS_TEST("format/single_byte_corruption_never_crashes")
   {
     auto patched = bytes;
     // Bias toward the header and index, where the structure lives.
-    const std::size_t limit = (iter % 4 == 0)
-                                  ? patched.size()
-                                  : std::min<std::size_t>(patched.size(), 512);
+    const std::size_t limit
+        = (iter % 4 == 0) ? patched.size() : std::min<std::size_t>(patched.size(), 512);
     for (int m = 0, n = 1 + static_cast<int>(rng() % 4); m < n; m++)
       patched[rng() % limit] = static_cast<char>(rng() & 0xff);
     spit(bad, patched);

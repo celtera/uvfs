@@ -7,6 +7,8 @@
 //   read-all    open + read every file
 //
 // Usage: uvfs_bench <file-list> <scratch-dir>
+#include <fcntl.h>
+#include <unistd.h>
 #include <uvfs/reader.hpp>
 #include <uvfs/writer.hpp>
 
@@ -19,9 +21,6 @@
 #include <random>
 #include <string>
 #include <vector>
-
-#include <fcntl.h>
-#include <unistd.h>
 
 namespace
 {
@@ -92,8 +91,7 @@ auto main(int argc, char** argv) -> int
     if (!ec)
       payload += static_cast<int64_t>(s);
   }
-  std::printf(
-      "corpus: %zu files, %.1f MB of payload\n\n", files.size(), payload / 1e6);
+  std::printf("corpus: %zu files, %.1f MB of payload\n\n", files.size(), payload / 1e6);
 
   const config configs[] = {
       {"store", uvfs::compression::none, 0, 0},
@@ -103,8 +101,16 @@ auto main(int argc, char** argv) -> int
   };
 
   std::printf(
-      "%-14s %10s %8s %9s %9s %9s %10s %11s %9s\n", "layout", "size", "of raw",
-      "build", "open", "lookup", "sparse-10", "read-all", "zero-copy");
+      "%-14s %10s %8s %9s %9s %9s %10s %11s %9s\n",
+      "layout",
+      "size",
+      "of raw",
+      "build",
+      "open",
+      "lookup",
+      "sparse-10",
+      "read-all",
+      "zero-copy");
   std::printf("%s\n", std::string(100, '-').c_str());
 
   for (const auto& c : configs)
@@ -209,8 +215,15 @@ auto main(int argc, char** argv) -> int
 
     std::printf(
         "%-14s %9.1fM %7.1f%% %8.0fms %8.1fus %7.1fns %9.0fus %10.0fms %6ld/%ld\n",
-        c.name, size / 1e6, 100.0 * static_cast<double>(size) / static_cast<double>(payload),
-        build / 1000.0, open_us, lookup_ns, sparse, read_all / 1000.0, zero_copy,
+        c.name,
+        size / 1e6,
+        100.0 * static_cast<double>(size) / static_cast<double>(payload),
+        build / 1000.0,
+        open_us,
+        lookup_ns,
+        sparse,
+        read_all / 1000.0,
+        zero_copy,
         r.count());
 
     std::filesystem::remove(arc);
