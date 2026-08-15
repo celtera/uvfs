@@ -8,26 +8,16 @@
 namespace uvfs
 {
 
-// Archive paths
-// ------------------------------------------------------------------------
-// A path inside a uvfs archive is a UTF-8 byte string using '/' as the only
-// separator. It is a lookup key, not a filesystem path: uvfs itself never
-// resolves it. It is validated at write time anyway, because anything that
-// extracts an archive to disk will join these names onto an output directory,
-// and a name containing ".." escapes that directory.
-//
-// A leading '/' is allowed and is kept verbatim -- "/a" and "a" are different
-// keys. Anything extracting to disk must strip leading separators.
+// A path inside an archive is a UTF-8 byte string with '/' as the only
+// separator. It is a lookup key, not a filesystem path, but it is validated at
+// write time because anything extracting to disk joins these names onto an
+// output directory. A leading '/' is kept verbatim, so "/a" and "a" differ.
 
 //! Largest archive path uvfs will store, in bytes.
 inline constexpr int64_t max_archive_path_size = 65535;
 
-//! Largest total size of all archive paths in one archive.
-//!
-//! Every entry locates its name by a 32-bit offset into a single blob, so the
-//! blob cannot exceed what that offset can address. Reaching this needs an
-//! extreme corpus -- roughly 43 million files at 100-byte paths -- but it is a
-//! real limit and the writer enforces it rather than truncating.
+//! Names are located by a 32-bit offset into one blob, so the blob cannot
+//! exceed what that offset addresses.
 inline constexpr int64_t max_names_size = 0xffffffff;
 
 enum class path_problem
@@ -109,8 +99,8 @@ check_archive_path(std::string_view p) noexcept -> path_problem
   return path_problem::ok;
 }
 
-//! True when `p` is safe to join onto an extraction directory (after stripping
-//! any leading separators).
+//! Safe to join onto an extraction directory, once leading separators are
+//! stripped.
 [[nodiscard]] constexpr auto is_safe_archive_path(std::string_view p) noexcept -> bool
 {
   return check_archive_path(p) == path_problem::ok;

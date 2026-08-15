@@ -47,11 +47,9 @@ struct reader::impl
     return entry::load_from(entries + i * entry_size);
   }
 
-  // Opening does not walk the index -- that is the whole point of the format --
-  // so entries are checked where they are used instead. These are a handful of
-  // comparisons against values already in registers, and they are what keeps a
-  // corrupt archive from turning into an out-of-bounds read. Integrity of the
-  // index as a whole is a separate question, answered by its hash.
+  // Opening does not walk the index, so entries are checked where they are
+  // used. A few comparisons on values already in registers; whole-index
+  // integrity is a separate question, answered by its hash.
   [[nodiscard]] auto sane(const entry& e) const noexcept -> bool
   {
     if (e.name_size == 0)
@@ -69,16 +67,13 @@ struct reader::impl
     switch (e.method)
     {
       case codec::store:
-        // A stored payload is the file, so the two sizes must agree.
         return e.orig_size == e.stored_size;
       case codec::zstd:
       case codec::zstd_dict:
       {
         if (e.method == codec::zstd_dict && !h.has(flag_has_dictionary))
           return false;
-        // Nothing can come out of nothing, and a payload cannot expand beyond
-        // what a valid zstd frame is able to encode. Division rather than
-        // multiplication: stored_size can be large enough to overflow.
+        // Division, not multiplication: stored_size can overflow.
         if (e.stored_size == 0)
           return e.orig_size == 0;
         return e.orig_size / max_zstd_expansion <= e.stored_size;
@@ -92,9 +87,7 @@ struct reader::impl
     return {names + e.name_offset, e.name_size};
   }
 
-  //! Checks one payload against its stored content hash. Only called when the
-  //! reader was opened with integrity::full, so the cost lands on the entries
-  //! actually read rather than on every open.
+  //! Only under integrity::full, so the cost lands on entries actually read.
   void verify_payload(int64_t i, const entry& e, std::string_view name) const
   {
     if (check != integrity::full || !hashes)
@@ -108,13 +101,9 @@ struct reader::impl
           + ", the payload is damaged");
   }
 
-  //! Cross-checks the index's idea of an entry's size against the size the
-  //! zstd frame itself declares, before anything is sized from it.
-  //!
-  //! The ratio bound in sane() is deliberately loose -- it has to admit every
-  //! frame zstd can produce -- so on its own it still lets a corrupt index
-  //! claim tens of gigabytes for a payload of a few megabytes. The frame
-  //! header settles it exactly, and reading it is a handful of bytes.
+  //! Cross-checks the index's size against the one the frame declares, before
+  //! anything is sized from it. The ratio bound in sane() has to admit every
+  //! frame zstd can produce, so it is too loose to rely on alone.
   void check_declared_size(const entry& e, std::string_view name) const
   {
     if (e.method == codec::store)
@@ -147,10 +136,8 @@ struct reader::impl
     return e;
   }
 
-  //! Open addressing with linear probing. The 32-bit fingerprint stored beside
-  //! the entry index means a probe that hits an occupied but different slot is
-  //! rejected without touching the entry or the name blob, which is what keeps
-  //! the cost at roughly one cache miss.
+  //! Open addressing with linear probing. The fingerprint beside each entry
+  //! index rejects a colliding slot without touching the entry or the name.
   [[nodiscard]] auto lookup(std::string_view path) const noexcept -> int64_t
   {
     if (h.table_capacity == 0)
@@ -159,12 +146,9 @@ struct reader::impl
     const uint64_t fingerprint = hv >> 32;
     const auto mask = static_cast<uint64_t>(h.table_capacity - 1);
     uint64_t slot = hv & mask;
-    // The probe is bounded by the table size rather than relying on finding an
-    // empty slot. A well-formed table is at most 70% full, so a miss stops
-    // after a couple of probes; but validate() checks the table's *capacity*,
-    // not its contents, and a corrupt table with no empty slot anywhere would
-    // otherwise spin forever. After `capacity` probes every slot has been
-    // visited, so there is nothing left to find.
+    // Bounded by the table size rather than by finding an empty slot:
+    // validate() checks the table's capacity, not its contents, and a corrupt
+    // table with no empty slot would otherwise spin forever.
     for (int64_t probes = 0; probes < h.table_capacity; probes++)
     {
       const uint64_t s = load<uint64_t>(table + slot * 8);
@@ -176,7 +160,7 @@ struct reader::impl
         if (i < h.file_count)
         {
           const entry e = entry_at(i);
-          // sane() first: comparing the name reads the blob.
+          // sane() first: the comparison reads the name blob.
           if (sane(e) && e.name_size == path.size()
               && memcmp(names + e.name_offset, path.data(), path.size()) == 0)
             return i;
@@ -201,20 +185,17 @@ try : impl{std::make_unique<struct impl>(path)}
 
   impl->h = header::load_from(base);
 
-  // Identity first, so a file that is not an archive at all, or is a newer
-  // format, gets a message that says so.
+  // Identity first, so a file that is not an archive says so.
   impl->h.check_identity();
 
-  // Then the header hash, before any offset in it is believed: every other
-  // region in the file is located through these 128 bytes. It covers 120
-  // bytes, so it is free, and therefore not optional.
+  // Then the header hash, before any offset in it is believed. 120 bytes, so
+  // it is free and not optional.
   if (impl->h.header_hash != hash_bytes(base, header::hashed_prefix))
     throw std::runtime_error("uvfs: header checksum mismatch, the file is damaged: ");
 
   impl->h.validate(filesize);
 
-  // Opening is exactly this: map, check the header, take pointers. There is
-  // no loop over the entries -- the index is already an index.
+  // Map, check the header, take pointers. No loop over the entries.
   const header& h = impl->h;
   impl->index = base + h.index_start;
   impl->entries = impl->index;
@@ -238,10 +219,8 @@ try : impl{std::make_unique<struct impl>(path)}
   if (h.has(flag_has_dictionary))
   {
 #if defined(UVFS_HAS_ZSTD)
-    // Checked unconditionally rather than by integrity level: a damaged
-    // dictionary corrupts every entry that uses it, and no other check in the
-    // archive can see it. Dictionaries are small, so this costs a few
-    // microseconds and only for archives that carry one.
+    // Unconditional: a damaged dictionary corrupts every entry that uses it
+    // and nothing else can see it. Small, so it costs microseconds.
     if (impl->h.dict_hash
         != hash_bytes(base + h.dict_start, static_cast<std::size_t>(h.dict_size)))
       throw std::runtime_error(
@@ -267,11 +246,9 @@ reader::~reader() = default;
 reader::reader(reader&&) noexcept = default;
 auto reader::operator=(reader&&) noexcept -> reader& = default;
 
-// A moved-from reader has a null pimpl. The standard contract for a moved-from
-// object is "valid but unspecified", and valid means member functions can still
-// be called -- so every entry point below treats that state as an empty
-// archive rather than dereferencing null. The branch is perfectly predicted and
-// does not show up in lookup timings.
+// A moved-from reader has a null pimpl. "Valid but unspecified" still means
+// member functions can be called, so each entry point below treats it as an
+// empty archive.
 
 auto reader::size() const noexcept -> std::size_t
 {
@@ -403,9 +380,7 @@ auto reader::read(std::string_view path) const -> std::optional<std::vector<char
   if (i < 0)
     return std::nullopt;
   const entry e = impl->checked_entry_at(i);
-  // Validate the size before it is used to allocate, not after: sizing a
-  // buffer straight from a corrupt index field is how a damaged archive turns
-  // into an out-of-memory kill.
+  // Validate before allocating, not after.
   impl->check_declared_size(e, path);
 
   std::vector<char> out(static_cast<std::size_t>(e.orig_size));
@@ -426,10 +401,8 @@ auto reader::verify() const -> std::vector<std::string>
   {
     const entry e = impl->checked_entry_at(i);
     const auto want = load<uint64_t>(impl->hashes + i * 8);
-    // Hash the bytes as they sit in the archive, which detects damage without
-    // paying for decompression. Note this covers the payload only: what a
-    // compressed payload decodes *to* also depends on the dictionary, which is
-    // why that has a checksum of its own, verified at open.
+    // Hashes the stored bytes, so damage is found without decompressing. The
+    // dictionary has its own checksum, verified at open.
     const auto got = hash_bytes(
         impl->payloads + e.data_offset, static_cast<std::size_t>(e.stored_size));
     if (got != want)

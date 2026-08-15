@@ -1,11 +1,6 @@
-// Fuzz target for the archive parser.
-//
-// The reader is the only part of uvfs that consumes bytes it did not produce,
-// so it is the only part where a malformed input must be handled rather than
-// trusted. The contract being fuzzed is narrow but absolute: for any byte
-// string at all, opening it either throws or yields a reader whose entries can
-// all be walked and read without leaving the mapping. It is never allowed to
-// crash.
+// Fuzz target for the archive parser. For any byte string at all, opening it
+// either throws or yields a reader whose entries can be walked and read
+// without leaving the mapping. It may never crash.
 //
 // Build:
 //   cmake -DUVFS_BUILD_FUZZERS=ON -DUVFS_SANITIZE=address,undefined \
@@ -23,9 +18,8 @@
 
 namespace
 {
-//! libFuzzer hands us bytes, but the reader opens a path and mmaps it, so the
-//! input has to reach the filesystem. A single reused temporary keeps this
-//! from dominating the run.
+//! The reader opens a path, so the input has to reach the filesystem. One
+//! reused temporary keeps that from dominating the run.
 auto scratch_path() -> const std::string&
 {
   static const std::string p = [] {
@@ -49,9 +43,8 @@ extern "C" auto LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) -> int
 
   try
   {
-    // header_only is the weakest setting, so it is the one worth fuzzing:
-    // anything the index hash would have caught has to be survivable without
-    // it, because memory safety must not depend on a checksum matching.
+    // The weakest setting is the one worth fuzzing: memory safety must not
+    // depend on a checksum matching.
     uvfs::reader r{path, uvfs::integrity::header_only};
 
     std::size_t sink = 0;
@@ -65,10 +58,8 @@ extern "C" auto LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) -> int
           return true;
         });
 
-    // Reading is fuzzed too. The original target stopped at find(), which
-    // only ever hands back a pointer into the mapping -- so the entire
-    // decompression path, and every size the index claims about it, went
-    // unexercised. That is exactly where an unbounded allocation was hiding.
+    // Reading too: find() only hands back a pointer, which leaves the whole
+    // decompression path and every size the index claims about it untouched.
     std::vector<char> buffer;
     for (int64_t i = 0; i < r.count(); i++)
     {
@@ -79,11 +70,9 @@ extern "C" auto LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) -> int
       (void)r.stat(info.path);
       (void)r.find(info.path);
 
-      // A refusal is the correct outcome for a corrupt entry, so failures are
-      // swallowed per entry rather than abandoning the rest of the archive.
-      // The cap keeps a legitimately large claim from being reported as an
-      // out-of-memory finding; anything past it is the allocation bound's
-      // problem, and there is a unit test for that.
+      // Refusal is correct for a corrupt entry, so failures are swallowed per
+      // entry. The cap keeps a large legitimate claim from being reported as
+      // an out-of-memory finding.
       constexpr int64_t read_cap = 64 << 20;
       if (info.size < 0 || info.size > read_cap)
         continue;

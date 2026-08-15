@@ -6,14 +6,9 @@
 namespace uvfs
 {
 
-//! The block of bytes the writer builds an archive into.
-//!
-//! Everywhere with a working shared file mapping this *is* the file: stores go
-//! straight to the page cache and flush() pushes them. Emscripten has mmap but
-//! a MAP_SHARED mapping is never written back, so an archive built through one
-//! would be silently lost; there the region is ordinary memory and flush()
-//! writes it out. The writer does not care which it got -- it has a pointer
-//! either way -- so there is one code path rather than two.
+//! The bytes the writer builds an archive into: a shared file mapping where
+//! the platform has one, otherwise memory written out on flush(). Emscripten
+//! never writes a MAP_SHARED mapping back, hence the second case.
 class output_region
 {
 public:
@@ -45,17 +40,14 @@ public:
   [[nodiscard]] auto data() const noexcept -> const char* { return base_; }
   [[nodiscard]] auto size() const noexcept -> int64_t { return size_; }
 
-  //! True when writes land in the file as they are made. When false the bytes
-  //! only reach the file at flush(), so nothing may read the file behind this
-  //! object's back before then.
+  //! When false, bytes only reach the file at flush().
   [[nodiscard]] static constexpr auto is_mapped() noexcept -> bool
   {
     return platform::has_shared_writable_mapping;
   }
 
-  //! Makes the first `bytes` of the region visible in the file. The archive is
-  //! built into a region sized for the uncompressed worst case, so this is
-  //! given the real size rather than the region's.
+  //! Makes the first `bytes` visible in the file. The region is sized for the
+  //! uncompressed worst case, so this takes the real size.
   void flush(int64_t bytes)
   {
     if (bytes <= 0 || !base_)

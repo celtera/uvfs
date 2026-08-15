@@ -34,8 +34,8 @@ struct UVFS_EXPORT skipped_file
   std::string reason;
 };
 
-//! Thrown by commit() when inputs could not be read and the policy is `fail`.
-//! The archive is not created; no partial file is left behind.
+//! Thrown by commit() when inputs could not be read under the `fail` policy.
+//! No partial file is left behind.
 struct UVFS_EXPORT commit_error : std::runtime_error
 {
   explicit commit_error(const std::string& what, std::vector<skipped_file> f)
@@ -56,9 +56,8 @@ public:
   auto operator=(writer&&) noexcept -> writer& = delete;
   ~writer();
 
-  //! Registers a file. The file is not read until commit().
-  //! Throws std::invalid_argument if `path_in_archive` is not a valid archive
-  //! path; see uvfs/path.hpp for the rule.
+  //! Registers a file; it is not read until commit(). Throws
+  //! std::invalid_argument for an invalid archive path, see uvfs/path.hpp.
   void add_file(std::string_view path_in_archive, std::string_view path_in_system);
 
   //! Controls what happens when an input cannot be read. Default: fail.
@@ -67,14 +66,11 @@ public:
   //! Controls what happens when an archive path is added twice. Default: fail.
   void set_duplicate_policy(on_duplicate policy) noexcept;
 
-  //! Number of threads used to build the archive. 0 (the default) means one
-  //! per hardware thread. Copying many small files is dominated by per-file
-  //! syscalls rather than by CPU, so more threads is not always faster.
+  //! 0 (the default) picks per hardware thread. Copying small files is bound
+  //! by per-file syscalls, so more is not always faster.
   void set_thread_count(int threads) noexcept;
 
-  //! Chooses whether and how payloads are compressed. Default: no compression.
-  //! Throws std::runtime_error if compression is asked for and this build has
-  //! no zstd support.
+  //! Default: no compression. Throws if asked for without zstd support.
   void set_compression(const compression_settings& settings);
 
   //! Store a content hash per entry so readers can detect a damaged payload.
@@ -82,9 +78,8 @@ public:
   //! cache from the copy. On by default.
   void set_content_hashes(bool enabled) noexcept;
 
-  //! Builds the archive. The output appears atomically: it is written to a
-  //! temporary file in the same directory and renamed into place, so an
-  //! interrupted or failed commit never leaves a partial archive behind.
+  //! Builds the archive. The output appears atomically: written to a temporary
+  //! alongside it and renamed into place.
   void commit(std::string_view path);
 
   //! Inputs left out of the last commit(), when the policy is `skip`.

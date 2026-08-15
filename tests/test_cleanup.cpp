@@ -25,10 +25,7 @@ auto temp_files_in(const std::filesystem::path& dir) -> int
 
 UVFS_TEST("cleanup/guard_runs_on_every_exception_type")
 {
-  // The whole point is that cleanup does not depend on someone having listed
-  // the right exception type in a catch clause. commit() caught commit_error
-  // and std::runtime_error; std::bad_alloc and std::length_error walked
-  // straight past both.
+  // Cleanup must not depend on listing the right exception type.
   struct oddball
   {
   };

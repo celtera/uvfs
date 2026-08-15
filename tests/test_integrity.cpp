@@ -137,9 +137,7 @@ UVFS_TEST("integrity/content_hashes_can_be_turned_off")
 
 UVFS_TEST("integrity/duplicate_entry_forged_into_the_index_is_caught")
 {
-  // v1 noticed duplicates because it walked the index at open. v2 does not,
-  // so this is the check that replaces it: forging a duplicate necessarily
-  // changes the index, and the index hash covers the index.
+  // Forging a duplicate changes the index, which the index hash covers.
   scratch_dir dir{"dupidx"};
   const auto arc = dir / "out.uvfs";
   uvfs::writer w;
@@ -163,10 +161,8 @@ UVFS_TEST("integrity/duplicate_entry_forged_into_the_index_is_caught")
 
 UVFS_TEST("integrity/mutation_sweep_with_index_checking")
 {
-  // The review measured 44% of single-byte corruptions being accepted as
-  // valid. With the index hash on, anything that lands in the header or the
-  // index has to be refused; only payload bytes can slip through to the
-  // content hashes.
+  // With the index hash on, anything landing in the header or index has to be
+  // refused; only payload bytes reach the content hashes.
   scratch_dir dir{"sweep"};
   const auto arc = build_sample(dir);
   const auto bytes = slurp(arc);
@@ -213,11 +209,8 @@ UVFS_TEST("integrity/mutation_sweep_with_index_checking")
 
 UVFS_TEST("integrity/lookup_terminates_when_the_table_has_no_empty_slot")
 {
-  // Found by the fuzzer. validate() checks the hash table's *capacity* against
-  // the file count, but nothing checks its contents. Linear probing stopped
-  // only at an empty slot, so a table corrupted to be entirely full made
-  // find() of an absent key loop forever -- a hang, not a crash, which is why
-  // the mutation tests never caught it: they all terminate.
+  // validate() checks the table's capacity, not its contents, so a table
+  // corrupted to be entirely full must not make a lookup spin forever.
   scratch_dir dir{"fulltable"};
   const auto arc = dir / "out.uvfs";
   uvfs::writer w;
@@ -282,10 +275,8 @@ UVFS_TEST("integrity/lookup_terminates_when_the_table_has_no_empty_slot")
 #if defined(UVFS_HAS_ZSTD)
 UVFS_TEST("integrity/dictionary_damage_is_detected")
 {
-  // The dictionary is the one region that every entry using it depends on, so
-  // damage there is not confined to one payload: it silently changes what
-  // every zstd_dict entry decodes to. Nothing else in the archive can notice,
-  // because content hashes cover the *stored* bytes, which are untouched.
+  // Damage to the dictionary changes what every entry using it decodes to,
+  // and content hashes cover the stored bytes, which it leaves untouched.
   scratch_dir dir{"dictdamage"};
   const auto arc = dir / "out.uvfs";
 
@@ -315,8 +306,7 @@ UVFS_TEST("integrity/dictionary_damage_is_detected")
   if (h.dict_size <= 0)
     return;
 
-  // Record what an undamaged archive says, so "silently wrong" can be told
-  // apart from "correctly refused".
+  // So "silently wrong" can be told apart from "correctly refused".
   std::vector<std::string> expected;
   {
     uvfs::reader r{arc};
@@ -375,10 +365,8 @@ UVFS_TEST("integrity/dictionary_damage_is_detected")
 #if defined(UVFS_HAS_ZSTD)
 UVFS_TEST("integrity/corrupt_orig_size_does_not_drive_a_huge_allocation")
 {
-  // sane() constrains orig_size only for codec::store. For a compressed entry
-  // it was unchecked, so read() sized a vector straight from a corrupt index
-  // field. On Linux with overcommit a request of a few hundred GB can succeed
-  // and get the process OOM-killed rather than throwing.
+  // A compressed entry's size must not be used to allocate before it is
+  // checked: with overcommit a huge request succeeds and is then OOM-killed.
   scratch_dir dir{"origsize"};
   const auto arc = dir / "out.uvfs";
   std::string text;
@@ -452,9 +440,8 @@ UVFS_TEST("integrity/corrupt_orig_size_does_not_drive_a_huge_allocation")
 
 UVFS_TEST("integrity/legitimate_high_ratio_payload_still_reads")
 {
-  // The bound must not reject a genuinely well-compressing payload. A run of
-  // identical bytes is close to zstd's best case, so if any real input trips
-  // the ratio check it is this one.
+  // The bound must not reject a genuinely well-compressing payload; a run of
+  // identical bytes is close to zstd's best case.
   scratch_dir dir{"highratio"};
   const auto arc = dir / "out.uvfs";
   const std::string zeros(8u * 1024 * 1024, '\0');

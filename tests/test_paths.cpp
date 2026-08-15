@@ -182,12 +182,9 @@ UVFS_TEST("path/replace_keeps_registration_order_stable")
 
 UVFS_TEST("path/writer_is_the_thing_that_prevents_duplicates")
 {
-  // Version 1 walked the whole index at open and built a heap map, so it could
-  // notice a duplicate on the way past. Version 2 deliberately does no work at
-  // open, so that check is gone from the reader. Duplicates are instead
-  // prevented where they can actually occur: the writer refuses to emit them.
-  // A duplicate appearing in a written archive would be corruption, which is
-  // what the index hash is for (see integrity tests).
+  // Nothing is walked at open, so duplicates are prevented where they can
+  // occur: the writer refuses to emit them. One appearing in a written archive
+  // would be corruption, which the index hash covers.
   scratch_dir dir{"dup-writer"};
   const auto arc = dir / "out.uvfs";
 
@@ -213,20 +210,16 @@ UVFS_TEST("path/writer_is_the_thing_that_prevents_duplicates")
 
 UVFS_TEST("path/name_blob_limit_is_a_stated_constant")
 {
-  // entry::name_offset is a uint32_t, so the name blob cannot exceed 4 GiB.
-  // The value is checked here so that widening the field without revisiting
-  // the writer's guard cannot pass unnoticed.
+  // Pinned so that widening entry::name_offset without revisiting the
+  // writer's guard cannot pass unnoticed.
   CHECK_EQ(uvfs::max_names_size, int64_t{0xffffffff});
   CHECK(uvfs::max_names_size <= int64_t{std::numeric_limits<uint32_t>::max()});
 }
 
 UVFS_TEST("path/oversized_name_blob_is_refused")
 {
-  // Reproducing this for real needs more than 4 GiB of archive paths held in
-  // memory at once, so it is opt-in: UVFS_SLOW_TESTS=1. Without the guard the
-  // writer truncates name offsets to 32 bits and reports success, producing an
-  // archive whose entries carry other entries' names and cannot be found by
-  // the names they were given.
+  // Needs more than 4 GiB of paths in memory, so it is opt-in. Without the
+  // guard the writer truncates name offsets and reports success.
   const char* slow = std::getenv("UVFS_SLOW_TESTS");
   if (!slow || std::string{slow} != "1")
   {

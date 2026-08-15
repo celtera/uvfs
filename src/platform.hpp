@@ -1,26 +1,7 @@
 #pragma once
 
-// Platform layer
-// ---------------------------------------------------------------------------
-// uvfs does a small number of things to files, and each of them has a fastest
-// way to do it that differs per platform: copy a range between two files,
-// reserve blocks, map a file, make writes durable, replace a file atomically.
-// Doing that with #ifdefs at every call site would scatter six platforms
-// through the writer; this header states the operations once and each backend
-// implements them with the best primitive it has.
-//
-// The interface is deliberately small and non-virtual: every call is resolved
-// at compile time, so the abstraction costs nothing.
-//
-//   linux       copy_file_range, posix_fallocate, fadvise/madvise
-//   freebsd     copy_file_range (13+), posix_fallocate
-//   macos       F_PREALLOCATE, F_FULLFSYNC, F_RDAHEAD
-//   windows     CreateFileMapping, positioned ReadFile, MoveFileEx
-//   emscripten  no writable shared mapping; staged in memory, written back
-//   generic     pread/pwrite and mmap, which every POSIX system has
-//
-// A backend may decline any fast path; the generic implementation is always
-// correct, and every backend is held to the same tests.
+// File operations, implemented per platform with the fastest primitive each
+// one offers. Everything here is resolved at compile time.
 
 #include <cstdint>
 #include <stdexcept>
@@ -29,10 +10,9 @@
 namespace uvfs
 {
 
-//! Thrown when the destination filesystem is out of space. Distinct from an
-//! ordinary runtime_error because it is a property of the archive being
-//! written, not of any one input, and must not be collected as a per-file
-//! failure that the commit could otherwise skip past.
+//! Out of space on the destination. A separate type because it concerns the
+//! archive, not one input, so it must not be collected as a skippable
+//! per-file failure.
 struct out_of_space : std::runtime_error
 {
   using std::runtime_error::runtime_error;
@@ -41,8 +21,8 @@ struct out_of_space : std::runtime_error
 namespace platform
 {
 
-//! What a file looks like without opening it. `device` and `inode` identify
-//! the file itself, so two names for one file can share a payload.
+//! `device` and `inode` identify the file itself, so two names for one file
+//! can share a payload.
 struct file_status
 {
   bool exists{};
@@ -64,13 +44,8 @@ struct file_status
 namespace uvfs::platform
 {
 
-// Every backend must provide these; the static_asserts keep a partially
-// implemented one from compiling into something that fails at runtime instead.
+// Catch a partially implemented backend at compile time.
 static_assert(sizeof(decltype(page_size())) >= 4, "page_size() must be provided");
-
-//! True when the platform can write through a shared file mapping and have
-//! those writes reach the file. Emscripten cannot, so the writer stages the
-//! archive in memory there and writes it back explicitly.
 static_assert(
     has_shared_writable_mapping || !has_shared_writable_mapping,
     "has_shared_writable_mapping must be defined");

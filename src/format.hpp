@@ -10,13 +10,6 @@
 #include <type_traits>
 
 // uvfs format, version 2
-// ---------------------------------------------------------------------------
-// The whole point of the format is that opening an archive costs one mmap and
-// one header check. Version 1 stored a chain of variable-length index records
-// that every reader had to walk and re-index into a heap hash map before the
-// first lookup; that work is proportional to the number of files, is repeated
-// in every process, and cannot be shared. Version 2 stores the finished index
-// in the file:
 //
 //   header  | fixed 128 bytes
 //   index   | entries, sorted by name, fixed 32-byte stride
@@ -25,14 +18,10 @@
 //           | name blob
 //   data    | payloads
 //
-// Entries are a fixed stride so the array can be indexed and binary searched
-// directly in the mapping. The hash table is built once, by the writer, and
-// read in place. Nothing is parsed at open, nothing is allocated, and because
-// the index lives in the mapping rather than on the heap, every process that
-// opens the same archive shares one copy through the page cache.
-//
-// Sorting by name is not only for binary search: it gives ordered iteration
-// for free, which is what extraction wants.
+// The index is stored finished and read in place: opening is one mmap and one
+// header check, with nothing parsed or allocated. Entries are a fixed stride
+// so the array is directly indexable, and sorted by name so index order is
+// also extraction order.
 
 namespace uvfs
 {
@@ -42,11 +31,9 @@ static constexpr uint8_t format_version = 2;
 static constexpr const char ident[8]
     = {'U', 'V', 'F', 'S', 0, 0, 0, static_cast<char>(format_version)};
 
-//! Stored payloads are aligned so they can be handed straight to code with
-//! alignment requirements: SIMD loads, DMA, audio buffers.
+//! So payloads can be handed to SIMD, DMA or audio code directly.
 static constexpr int64_t payload_alignment = 64;
-//! Compressed payloads have to be copied out anyway, so they only need enough
-//! alignment to keep the layout tidy.
+//! Compressed payloads are copied out anyway.
 static constexpr int64_t compressed_alignment = 8;
 
 static constexpr int64_t header_size = 128;
@@ -58,15 +45,9 @@ static constexpr int64_t max_file_count = (int64_t{1} << 31) - 2;
 //! Empty hash table slot.
 static constexpr uint64_t empty_slot = ~uint64_t{0};
 
-//! Loosest ratio a valid zstd frame can achieve, used to reject an index that
-//! claims a payload expands to something the stored bytes could not encode.
-//!
-//! zstd's densest encoding is a run-length block: 3 bytes of block header for
-//! up to ZSTD_BLOCKSIZE_MAX (128 KiB) of output, so the asymptotic ceiling is
-//! 131072/3 = 43690.7 to one. Rounding up to 50000 keeps every real frame
-//! comfortably inside the bound -- a measured best case, 8 MiB of zeros at
-//! level 19, reaches 30728:1 -- while still rejecting the absurd values that
-//! corruption produces.
+//! Rejects an index claiming a payload expands beyond what a zstd frame can
+//! encode. The densest encoding is a run-length block, 3 bytes of header for
+//! up to 128 KiB, so the ceiling is 43691:1; 50000 leaves room.
 static constexpr int64_t max_zstd_expansion = 50000;
 
 enum class codec : uint8_t
@@ -92,8 +73,7 @@ static constexpr auto round_up(int64_t x, int64_t multiple) noexcept -> int64_t
   return static_cast<int64_t>(((static_cast<uint64_t>(x) + m - 1) / m) * m);
 }
 
-// The arithmetic is done unsigned so that rounding cannot overflow into
-// undefined behaviour; the result is back in range by construction.
+// Unsigned so rounding cannot overflow; the result is back in range.
 // NOLINTNEXTLINE(bugprone-narrowing-conversions)
 [[nodiscard]]
 static constexpr auto round_up_8(int64_t x) noexcept -> int64_t
@@ -123,11 +103,9 @@ static constexpr auto table_capacity_for(int64_t n) noexcept -> int64_t
 template <typename T>
 static constexpr int64_t ssizeof = static_cast<int64_t>(sizeof(T));
 
-// Reads a scalar out of the mapping without assuming anything about the
-// alignment of the source. A corrupt header can point a region at an odd
-// offset, and forming a misaligned pointer there is undefined behaviour even
-// on architectures where the load itself would have worked. Compilers lower
-// this to a plain load when the target allows it.
+// Reads a scalar without assuming the source is aligned: a corrupt header can
+// point a region at an odd offset, and a misaligned pointer is UB even where
+// the load would have worked. Lowers to a plain load where allowed.
 template <typename T>
 [[nodiscard]] inline auto load(const char* p) noexcept -> T
 {
@@ -194,12 +172,8 @@ struct header
   int64_t dict_start{};
   int64_t dict_size{};
   uint64_t index_hash{};
-  //! XXH3 of the dictionary region. The dictionary is the one part of an
-  //! archive that every entry using it depends on, so damage there is not
-  //! confined to a single payload: it silently changes what every zstd_dict
-  //! entry decodes to. Nothing else can catch it -- the header hash stops at
-  //! byte 120, the index hash covers only the index, and per-entry content
-  //! hashes cover the stored bytes, which a damaged dictionary leaves intact.
+  //! XXH3 of the dictionary. Nothing else covers it, and damage there changes
+  //! what every entry using it decodes to.
   uint64_t dict_hash{};
   uint64_t header_hash{};
 
@@ -280,17 +254,11 @@ struct header
     return hashes_offset() + hashes_bytes();
   }
 
-  // Checks the header against the real size of the file on disk. Every
-  // comparison is done in unsigned arithmetic against a remaining-space budget
-  // rather than by adding two fields together: `a + b > limit` overflows for
-  // corrupt values, and signed overflow is undefined behaviour, so the check
-  // itself would be the bug. `a > limit - b` cannot overflow once `b <= limit`
-  // is known.
-  //! Is this a uvfs archive of a version we speak? Checked before the header
-  //! hash so that a file which simply is not an archive, or is a newer one,
-  //! says so instead of reporting a checksum mismatch. A genuinely newer
-  //! archive still has a valid header hash, so this ordering does not weaken
-  //! corruption detection.
+  // Comparisons are unsigned and against a remaining-space budget: `a + b >
+  // limit` overflows for corrupt values, and signed overflow would make the
+  // check itself the bug.
+  //! Checked before the header hash, so a file that is not an archive at all
+  //! says so rather than reporting a checksum mismatch.
   void check_identity() const
   {
     if (memcmp(magic, this->head, sizeof(magic)) != 0)
@@ -328,7 +296,7 @@ struct header
     if (file_count > max_file_count)
       throw std::runtime_error("uvfs: file count is implausibly large: ");
 
-    // The table must be a power of two, because lookup masks with capacity-1.
+    // Lookup masks with capacity-1, so it must be a power of two.
     if (table_capacity != table_capacity_for(file_count))
       throw std::runtime_error(
           "uvfs: hash table capacity does not match the file count: ");
@@ -344,7 +312,6 @@ struct header
     if (idx_sz > total - idx_at)
       throw std::runtime_error("uvfs: index extends past the end of the file: ");
 
-    // The index sub-regions must fit inside the index, in order.
     // file_count is bounded above, so these products cannot overflow.
     const auto need
         = static_cast<uint64_t>(names_offset()) + static_cast<uint64_t>(names_size);
@@ -359,8 +326,7 @@ struct header
     if (dat_sz > total - dat_at)
       throw std::runtime_error("uvfs: data extends past the end of the file: ");
 
-    // The alignment guarantee is part of the format, so a reader enforces it
-    // rather than assuming it: callers rely on the pointers they get back.
+    // Callers rely on the pointers they get back being aligned.
     if (data_start % payload_alignment != 0)
       throw std::runtime_error("uvfs: data region is not 64-byte aligned: ");
 

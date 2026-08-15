@@ -10,11 +10,8 @@ using namespace uvfs::test;
 
 UVFS_TEST("api/moved_from_reader_is_usable_not_undefined")
 {
-  // Move leaves the pimpl null. Every accessor dereferenced it, and the cheap
-  // ones are noexcept, so a moved-from reader was a segfault waiting for its
-  // first method call rather than a merely useless object. Standard practice
-  // is that a moved-from object is valid but unspecified -- valid means you
-  // can still call things on it.
+  // Move leaves the pimpl null, and the cheap accessors are noexcept. A
+  // moved-from object is valid but unspecified; valid means it can be used.
   scratch_dir dir{"moved"};
   const auto arc = dir / "out.uvfs";
   uvfs::writer w;

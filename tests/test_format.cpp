@@ -13,9 +13,8 @@ using namespace uvfs::test;
 // -------------------------------------------------------------------- R1
 UVFS_TEST("format/last_payload_ending_exactly_at_eof")
 {
-  // A payload whose size is a multiple of 64 needs no alignment padding, so
-  // the archive's last byte is also the payload's last byte. The bounds check
-  // used to reject that, making roughly one archive in 64 unreadable.
+  // A payload whose size is a multiple of 64 needs no padding, so the last
+  // byte of the archive is also the last byte of the payload.
   for (std::size_t sz : {1u, 63u, 64u, 65u, 127u, 128u, 129u, 4096u})
   {
     scratch_dir dir{"eof"};
@@ -41,8 +40,7 @@ UVFS_TEST("format/last_payload_ending_exactly_at_eof")
 
 UVFS_TEST("format/every_payload_size_class_roundtrips")
 {
-  // The multiple-of-64 case only broke for the *last* entry, so cover the
-  // interior positions too.
+  // The boundary case only bites the last entry, so cover interior ones too.
   scratch_dir dir{"sizes"};
   const std::size_t sizes[] = {0, 1, 63, 64, 65, 127, 128, 191, 192, 1000};
   uvfs::writer w;
@@ -276,11 +274,8 @@ UVFS_TEST("format/rejects_truncated_files")
 
 UVFS_TEST("format/single_byte_corruption_never_crashes")
 {
-  // The reader must either refuse an archive or read it without ever leaving
-  // the mapping. Under ASAN this is the test that proves it; without ASAN it
-  // still catches wild pointers that segfault. Note that v2 does not walk the
-  // index at open, so a corrupt entry legitimately surfaces on use rather
-  // than on open -- both count as handled.
+  // Either refuse the archive or read it without leaving the mapping. Opening
+  // does not walk the index, so a corrupt entry surfaces on use; both count.
   scratch_dir dir{"mutate"};
   const auto arc = build_sample(dir);
   const auto bytes = slurp(arc);

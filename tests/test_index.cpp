@@ -219,10 +219,8 @@ UVFS_TEST("index/reader_is_movable")
 
 UVFS_TEST("index/open_cost_does_not_scale_with_entry_count")
 {
-  // The point of v2: the index is used in place, so opening a big archive
-  // costs the same as opening a small one. Comparing a large archive against a
-  // small one isolates that from the fixed cost of a mapping, which is what an
-  // absolute threshold would be at the mercy of.
+  // The index is used in place, so opening a big archive costs the same as a
+  // small one. Comparing the two isolates that from the fixed cost of a map.
   if (!have_current_rss())
   {
     std::printf("    (no /proc, cannot measure current RSS here; skipping)\n");
@@ -262,9 +260,7 @@ UVFS_TEST("index/open_cost_does_not_scale_with_entry_count")
       small_cost,
       large_cost);
 
-  // v1 built a heap hash map here: 50000 entries at ~40 bytes plus table
-  // overhead is several megabytes, per process, and it would grow with n.
-  // v2 touches the header page and stops, so the two must be within noise.
+  // A heap index would grow with n; this touches the header page and stops.
   CHECK(large_cost - small_cost < 256);
 
   // The reader is fully usable afterwards despite having done no work.

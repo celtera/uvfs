@@ -20,11 +20,8 @@
 namespace uvfs::platform
 {
 
-// --------------------------------------------------------------- capabilities
+//! Emscripten's mmap never writes a MAP_SHARED mapping back to the file.
 #if defined(__EMSCRIPTEN__)
-//! Emscripten's mmap does not write a MAP_SHARED mapping back to the file, so
-//! anything built through a mapping would be silently lost. The writer stages
-//! into memory instead and writes the result out.
 inline constexpr bool has_shared_writable_mapping = false;
 inline constexpr const char* backend_name = "emscripten";
 #elif defined(__linux__)
@@ -41,12 +38,10 @@ inline constexpr bool has_shared_writable_mapping = true;
 inline constexpr const char* backend_name = "posix";
 #endif
 
-// copy_file_range moves bytes between two files without them entering user
-// space, and on filesystems that support reflinks it does not copy at all.
-// Linux has had it since 4.5, FreeBSD since 13.
-// UVFS_FORCE_GENERIC_COPY exists so that the fallback can be exercised on a
-// system that does have the fast path; otherwise it is only ever compiled on
-// the platforms that cannot test it.
+// copy_file_range moves bytes without them entering user space, and reflinks
+// where the filesystem allows. Linux 4.5+, FreeBSD 13+.
+// UVFS_FORCE_GENERIC_COPY builds the fallback where the fast path exists, so
+// it can be tested.
 #if (defined(__linux__) || (defined(__FreeBSD__) && __FreeBSD__ >= 13)) \
     && !defined(UVFS_FORCE_GENERIC_COPY)
 inline constexpr bool has_kernel_copy = true;
@@ -54,14 +49,11 @@ inline constexpr bool has_kernel_copy = true;
 inline constexpr bool has_kernel_copy = false;
 #endif
 
-// ---------------------------------------------------------------------- errors
 namespace detail
 {
-// strerror_r comes in two incompatible shapes. The XSI one returns int and
-// fills the caller's buffer; the GNU one returns char*, which may or may not
-// point at that buffer. Which one is declared depends on the libc and on
-// feature-test macros, so picking with #ifdef gets it wrong on some
-// combination. Overload resolution just asks the compiler which one it has.
+// strerror_r has two shapes: XSI returns int, GNU returns char*. Which is
+// declared depends on libc and feature-test macros, so let overload resolution
+// decide rather than #ifdef.
 [[nodiscard]] inline auto from_strerror_r(int rc, const char* buf) -> std::string
 {
   return rc == 0 ? std::string{buf} : std::string{};
@@ -96,7 +88,6 @@ namespace detail
   return static_cast<uint64_t>(::getpid());
 }
 
-// ------------------------------------------------------------------------ file
 class file
 {
 public:
@@ -110,8 +101,6 @@ public:
     file f;
     f.fd_ = fd;
 #if defined(__APPLE__)
-    // Ask the kernel to read ahead: uvfs walks archives forwards far more
-    // often than it seeks about in them.
     ::fcntl(fd, F_RDAHEAD, 1);
 #endif
     return f;
@@ -173,10 +162,8 @@ public:
       throw std::runtime_error("uvfs: could not resize (" + last_error() + "): ");
   }
 
-  //! Reserves blocks so that running out of space is reported here rather than
-  //! as a SIGBUS when the mapping is written through: a store to a page the
-  //! filesystem cannot back is not something the kernel can turn into an error
-  //! return. Returns false where the platform offers no such guarantee.
+  //! Reserves blocks, so a full filesystem is an error here rather than a
+  //! SIGBUS when the mapping is written through. False where unsupported.
   auto reserve(int64_t offset, int64_t length) const -> bool
   {
     if (length <= 0)
@@ -190,8 +177,8 @@ public:
           "uvfs: not enough space for the archive (" + error_text(rc) + "): ");
     return false; // EOPNOTSUPP and friends
 #elif defined(__APPLE__)
-    // macOS has no posix_fallocate. F_PREALLOCATE is the equivalent, and it
-    // only extends: the file still has to be grown separately.
+    // macOS has no posix_fallocate; F_PREALLOCATE only extends, so the file is
+    // still grown separately.
     fstore_t store{};
     store.fst_flags = F_ALLOCATECONTIG;
     store.fst_posmode = F_PEOFPOSMODE;
@@ -199,8 +186,7 @@ public:
     store.fst_length = offset + length;
     if (::fcntl(fd_, F_PREALLOCATE, &store) == -1)
     {
-      // Contiguous allocation failed; any allocation will do.
-      store.fst_flags = F_ALLOCATEALL;
+      store.fst_flags = F_ALLOCATEALL; // contiguous failed; any will do
       if (::fcntl(fd_, F_PREALLOCATE, &store) == -1)
       {
         if (errno == ENOSPC || errno == EDQUOT)
@@ -220,9 +206,8 @@ public:
   void flush() const
   {
 #if defined(__APPLE__)
-    // fsync on macOS only hands the data to the drive; F_FULLFSYNC is what
-    // actually makes it survive power loss. Fall back if the filesystem says
-    // it does not support it.
+    // fsync only reaches the drive's cache here; F_FULLFSYNC survives power
+    // loss. Not supported on every filesystem.
     if (::fcntl(fd_, F_FULLFSYNC) != -1)
       return;
 #endif
@@ -230,7 +215,7 @@ public:
       throw std::runtime_error("uvfs: could not flush (" + last_error() + "): ");
   }
 
-  //! Positioned read. Returns bytes read; 0 means end of file.
+  //! Returns bytes read; 0 means end of file.
   [[nodiscard]] auto read_at(void* dst, int64_t n, int64_t offset) const -> int64_t
   {
     auto* out = static_cast<char*>(dst);
@@ -255,7 +240,7 @@ public:
     return done;
   }
 
-  //! Positioned write. Writes all `n` bytes or throws.
+  //! Writes all `n` bytes or throws.
   void write_at(const void* src, int64_t n, int64_t offset) const
   {
     const auto* in = static_cast<const char*>(src);
@@ -284,7 +269,6 @@ private:
   int fd_{-1};
 };
 
-// --------------------------------------------------------------------- mapping
 class mapping
 {
 public:
@@ -353,8 +337,7 @@ public:
   [[nodiscard]] auto data() const noexcept -> const char* { return base_; }
   [[nodiscard]] auto size() const noexcept -> int64_t { return size_; }
 
-  //! Pushes this mapping's dirty pages, rather than every dirty page on the
-  //! machine, which is what a bare sync() would do.
+  //! Pushes this mapping's dirty pages only.
   void flush(int64_t length) const
   {
     if (!base_ || length <= 0 || !writable_)
@@ -363,7 +346,7 @@ public:
       throw std::runtime_error("uvfs: could not flush mapping (" + last_error() + "): ");
   }
 
-  //! Hints. Advisory everywhere: a platform that ignores them is still correct.
+  //! Advisory; ignoring them is still correct.
   void advise_random() const noexcept
   {
 #if defined(MADV_RANDOM)
@@ -393,15 +376,9 @@ private:
   bool writable_{};
 };
 
-// ------------------------------------------------------------------ copy path
 //! Copies `n` bytes from the start of `src` into `dst` at `dst_offset`.
-//! `dst_mapped` points at that offset within a writable mapping of `dst`, or
-//! is null when the caller has no mapping.
-//!
-//! Small files go through pread: mmap-per-file costs two syscalls plus a TLB
-//! shootdown broadcast to every core, which with many writer threads was the
-//! most expensive thing the writer did. Large files are handed to the kernel
-//! where that is possible.
+//! `dst_mapped` points at that offset in a writable mapping of `dst`, or is
+//! null. Small files go through pread; large ones to the kernel where it can.
 inline void copy_file_into(
     const file& src,
     const file& dst,
@@ -412,10 +389,8 @@ inline void copy_file_into(
   if (n <= 0)
     return;
 
-    // A preprocessor guard, not `if constexpr`: this function is not a template,
-    // and in a non-template the discarded branch of an `if constexpr` still has
-    // to name-lookup successfully. macOS has no copy_file_range, so mentioning it
-    // at all failed to compile there even though the branch was never taken.
+    // Preprocessor, not `if constexpr`: this is not a template, so a discarded
+    // branch still has to name-lookup, and macOS has no copy_file_range.
 #if (defined(__linux__) || (defined(__FreeBSD__) && __FreeBSD__ >= 13)) \
     && !defined(UVFS_FORCE_GENERIC_COPY)
   // Below this the extra syscall costs more than the copy saves.
@@ -445,9 +420,8 @@ inline void copy_file_into(
     }
     if (done == n)
       return;
-    // Partially copied by the kernel: finish the rest ourselves. The source
-    // offset stays absolute while the destination is addressed through the
-    // mapping when there is one.
+    // Kernel copied part of it; finish the rest. The source offset stays
+    // absolute, the destination goes through the mapping when there is one.
     if (dst_mapped)
     {
       if (src.read_at(dst_mapped + done, n - done, done) != n - done)
@@ -471,7 +445,7 @@ inline void copy_file_into(
     return;
   }
 
-  // No mapping to read into: stage through a bounded buffer.
+  // No mapping to read into; stage through a bounded buffer.
   constexpr int64_t chunk = int64_t{1} << 20;
   std::vector<char> buf(static_cast<std::size_t>(std::min(chunk, n)));
   int64_t done = 0;
@@ -486,7 +460,6 @@ inline void copy_file_into(
   }
 }
 
-// ------------------------------------------------------------- filesystem ops
 [[nodiscard]] inline auto stat_path(const char* path) -> file_status
 {
   file_status s;
@@ -508,8 +481,7 @@ inline void copy_file_into(
   return ::access(path, R_OK) == 0;
 }
 
-//! Replaces `to` with `from` in one step, so a reader either sees the old file
-//! or the new one and never a partial write.
+//! Replaces `to` with `from` in one step.
 [[nodiscard]] inline auto rename_replace(const char* from, const char* to) -> bool
 {
   return ::rename(from, to) == 0;
@@ -520,7 +492,7 @@ inline void remove_quietly(const char* path) noexcept
   ::unlink(path);
 }
 
-//! Drops a file from the page cache. Used by benchmarks to measure cold reads.
+//! Drops a file from the page cache, for cold-read benchmarks.
 inline void evict_from_cache(const char* path) noexcept
 {
 #if defined(POSIX_FADV_DONTNEED)

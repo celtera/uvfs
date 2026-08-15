@@ -1,10 +1,5 @@
 #pragma once
 // Windows backend. Included by platform.hpp.
-//
-// Win32 has an equivalent for every primitive uvfs needs, but none of them are
-// spelled like their POSIX counterparts: file mappings are objects rather than
-// a call, positioned reads go through OVERLAPPED rather than pread, and
-// replacing a file atomically is MoveFileEx rather than rename.
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -24,8 +19,8 @@ namespace uvfs::platform
 {
 
 inline constexpr bool has_shared_writable_mapping = true;
-//! Win32 has no equivalent of copy_file_range that writes into the middle of
-//! an existing file; CopyFileEx only produces whole files.
+//! CopyFileEx only produces whole files, so there is no kernel copy into an
+//! offset.
 inline constexpr bool has_kernel_copy = false;
 inline constexpr const char* backend_name = "windows";
 
@@ -47,8 +42,7 @@ inline constexpr const char* backend_name = "windows";
   std::string msg = (n && buffer) ? std::string{buffer, n} : std::string{};
   if (buffer)
     ::LocalFree(buffer);
-  // FormatMessage ends its strings with CRLF, which reads badly inside a
-  // sentence.
+  // FormatMessage appends CRLF.
   while (!msg.empty() && (msg.back() == '\n' || msg.back() == '\r'))
     msg.pop_back();
   if (msg.empty())
@@ -75,8 +69,7 @@ inline constexpr const char* backend_name = "windows";
 
 namespace detail
 {
-//! Win32's wide-character API is the one without path length and encoding
-//! limits, so paths are converted rather than passed to the ANSI entry points.
+//! The wide API is the one without path length and encoding limits.
 [[nodiscard]] inline auto widen(const char* utf8) -> std::wstring
 {
   if (!utf8 || !*utf8)
@@ -95,7 +88,6 @@ namespace detail
 }
 } // namespace detail
 
-// ------------------------------------------------------------------------ file
 class file
 {
 public:
@@ -192,10 +184,8 @@ public:
     }
   }
 
-  //! Setting the end of file allocates the space on NTFS, so growing the file
-  //! is itself the reservation: the blocks exist before anything writes
-  //! through the mapping. There is no separate call to make, and no way to
-  //! reserve a sub-range, so this only reports whether the space is there.
+  //! On NTFS, growing the file allocates the space, so the extend is itself
+  //! the reservation. There is no way to reserve a sub-range.
   auto reserve(int64_t offset, int64_t length) const -> bool
   {
     if (length <= 0)
@@ -271,7 +261,6 @@ private:
   HANDLE h_{INVALID_HANDLE_VALUE};
 };
 
-// --------------------------------------------------------------------- mapping
 class mapping
 {
 public:
@@ -330,8 +319,7 @@ public:
 
   void advise_sequential() const noexcept
   {
-    // PrefetchVirtualMemory is the closest equivalent to MADV_WILLNEED, and is
-    // only present from Windows 8 onwards; missing is not an error.
+    // Closest equivalent to MADV_WILLNEED; Windows 8+, absence is fine.
     if (!base_)
       return;
     using prefetch_fn = BOOL(WINAPI*)(HANDLE, ULONG_PTR, PVOID, ULONG);
@@ -363,8 +351,6 @@ private:
     if (length == 0)
       return m;
 
-    // A zero size in CreateFileMapping means "as large as the file", which is
-    // what we want, but the file must already be that large.
     HANDLE section = ::CreateFileMappingW(
         f.native(),
         nullptr,
@@ -400,7 +386,6 @@ private:
   bool writable_{};
 };
 
-// ------------------------------------------------------------------ copy path
 inline void copy_file_into(
     const file& src,
     const file& dst,
@@ -431,7 +416,6 @@ inline void copy_file_into(
   }
 }
 
-// ------------------------------------------------------------- filesystem ops
 [[nodiscard]] inline auto stat_path(const char* path) -> file_status
 {
   file_status s;
@@ -445,9 +429,8 @@ inline void copy_file_into(
   s.size = (static_cast<int64_t>(attr.nFileSizeHigh) << 32)
            | static_cast<int64_t>(attr.nFileSizeLow);
 
-  // The volume serial number and file index together identify the file itself,
-  // which is what lets two names for one file share a payload. They are only
-  // available through an open handle.
+  // Volume serial plus file index identify the file; only available through
+  // an open handle.
   if (s.regular)
   {
     HANDLE h = ::CreateFileW(
@@ -494,8 +477,7 @@ inline void copy_file_into(
 {
   const auto wf = detail::widen(from);
   const auto wt = detail::widen(to);
-  // rename() on Windows refuses to overwrite; MoveFileEx with
-  // MOVEFILE_REPLACE_EXISTING is the atomic replace POSIX gets from rename.
+  // rename() refuses to overwrite here; MoveFileEx does the atomic replace.
   return ::MoveFileExW(
              wf.c_str(), wt.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
          != 0;
@@ -509,8 +491,7 @@ inline void remove_quietly(const char* path) noexcept
 
 inline void evict_from_cache(const char* path) noexcept
 {
-  // Reopening with FILE_FLAG_NO_BUFFERING does not purge what is already
-  // cached, and there is no unprivileged way to drop a file from the cache.
+  // No unprivileged way to drop a file from the cache.
   (void)path;
 }
 

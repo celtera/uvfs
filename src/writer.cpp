@@ -35,7 +35,7 @@ struct pending
   std::string path_in_system;
 };
 
-//! An input that survived sizing and has been given a place in the archive.
+//! An input that survived sizing and has a place in the archive.
 struct placed
 {
   const pending* src{};
@@ -45,9 +45,8 @@ struct placed
   uint64_t inode{};        //!< two names for one file can share a payload
   int64_t shares_with{-1}; //!< index of the entry holding the bytes, or -1
 
-  // Filled in once the payload has actually been placed. With compression the
-  // stored size is not known until the bytes have been through the codec, so
-  // the index cannot be written until every payload has found its home.
+  // Only known once the payload is placed: with compression the stored size
+  // depends on the codec, so the index is written last.
   int64_t data_offset{};
   int64_t stored_size{};
   codec method{codec::store};
@@ -59,19 +58,15 @@ void unlink_quietly(const std::string& p) noexcept
   platform::remove_quietly(p.c_str());
 }
 
-//! Copying files is bound by per-file syscalls and page-cache contention, not
-//! by CPU, and measurably stops improving past about a dozen threads: on a
-//! 48-thread machine, 200k small files take 0.37s with 12 threads and 0.45s
-//! with 48. Compression is the opposite -- it is CPU-bound and scales all the
-//! way out (1.31s to 0.21s from 1 to 48 threads on the same corpus) -- so the
+//! Copying is bound by per-file syscalls, not CPU, and stops improving past
+//! about a dozen threads. Compression is CPU-bound and scales further, so the
 //! two phases get different defaults.
 constexpr int copy_thread_cap = 12;
 
 [[nodiscard]] auto worker_count(int64_t items, int requested, int cap = 0) -> int
 {
 #if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
-  // A build without pthreads cannot create a thread at all; asking anyway
-  // throws "thread constructor failed" from inside the writer.
+  // Without pthreads a thread cannot be created at all.
   (void)requested;
   (void)cap;
   (void)items;
@@ -99,9 +94,7 @@ void parallel_for(int64_t n, int requested_threads, F&& body, int cap = 0)
     return;
   const int threads = worker_count(n, requested_threads, cap);
 
-  // One worker means the caller's thread, with no thread objects created at
-  // all. That is the fast path for small archives and the only path on a
-  // platform without threads.
+  // One worker means the caller's thread and no thread objects at all.
   if (threads <= 1)
   {
     for (int64_t i = 0; i < n; i++)
@@ -111,12 +104,9 @@ void parallel_for(int64_t n, int requested_threads, F&& body, int cap = 0)
 
   std::atomic<int64_t> next{0};
 
-  // std::thread rather than std::jthread: jthread needs libc++ 18, which is
-  // newer than the toolchains shipped with several targets this has to build
-  // on. Nothing here wants a stop token, so the only thing jthread was
-  // providing was the join, and a guard does that on every path -- including
-  // an exception from emplace_back part way through starting the pool, where
-  // leaving a thread unjoined would call std::terminate.
+  // std::thread, not jthread: jthread needs libc++ 18, newer than some targets
+  // ship, and only the join was wanted. The guard covers every exit, including
+  // an exception part way through starting the pool.
   std::vector<std::thread> pool;
   pool.reserve(static_cast<std::size_t>(threads));
   const scope_guard join_all{[&]
@@ -145,19 +135,15 @@ void parallel_for(int64_t n, int requested_threads, F&& body, int cap = 0)
     }
     catch (const std::system_error&)
     {
-      // The system refused another thread. Whatever was started is still
-      // running and will be joined; the caller's thread takes the rest rather
-      // than failing the whole archive over it.
-      break;
+      break; // no more threads; the caller's thread takes the rest
     }
   }
   worker();
 }
 
 #if defined(UVFS_HAS_ZSTD)
-//! Reads a whole file. Returns false and fills `error` rather than throwing,
-//! because this runs on worker threads. Only the compression path needs it;
-//! the store path copies straight into the mapping.
+//! Returns false and fills `error` rather than throwing: this runs on worker
+//! threads.
 [[nodiscard]] auto read_file(
     const std::string& path,
     int64_t expected,
@@ -192,10 +178,8 @@ void parallel_for(int64_t n, int requested_threads, F&& body, int cap = 0)
 
 //! How many bytes of input a single compression batch holds in memory at once.
 constexpr int64_t compression_batch_bytes = int64_t{64} * 1024 * 1024;
-//! Above this size, whether a payload is worth compressing is decided from a
-//! sample rather than by compressing the whole thing. This is what keeps a
-//! multi-gigabyte video from being compressed in full only to discover that it
-//! was already compressed.
+//! Above this, compressibility is decided from a sample rather than by
+//! compressing a multi-gigabyte file to find out it was already compressed.
 constexpr int64_t sample_decision_threshold = int64_t{1} << 20;
 constexpr int64_t sample_bytes = int64_t{256} * 1024;
 //! Chunk size when streaming a payload too large to hold in memory.
@@ -211,16 +195,14 @@ constexpr int64_t stream_chunk = int64_t{4} * 1024 * 1024;
     return false;
   if (cs.method == compression::always)
     return true;
-  // Saving a couple of percent is not worth giving up the zero-copy pointer
-  // and paying to decompress on every read.
+  // A couple of percent is not worth losing the zero-copy pointer.
   const int64_t saved = original - compressed;
   return saved * 100 >= original * cs.min_gain_percent;
 }
 
 using cdict_ptr = std::unique_ptr<ZSTD_CDict, size_t (*)(ZSTD_CDict*)>;
 
-//! Decides from the first `sample_bytes` whether a large payload is worth
-//! compressing at all.
+//! Decides from the first `sample_bytes`.
 [[nodiscard]] auto
 sample_says_compress(const std::string& path, const compression_settings& cs) -> bool
 {
@@ -247,15 +229,13 @@ sample_says_compress(const std::string& path, const compression_settings& cs) ->
 
 #if defined(UVFS_HAS_ZSTD)
 
-//! Trains a zstd dictionary from a sample of the inputs. A shared dictionary
-//! is what makes compression work on many small files: each payload on its own
-//! is too short for zstd to build up any history, but they resemble each other.
+//! A shared dictionary is what makes compression work on many small files,
+//! which are individually too short for zstd to build any history.
 [[nodiscard]] auto train_dictionary_from(
     const std::vector<placed>& plan,
     const compression_settings& cs) -> std::vector<char>
 {
-  // Sample small files: they are the ones a dictionary helps, and feeding
-  // multi-megabyte payloads to the trainer wastes time and skews the result.
+  // Small files only: they are what a dictionary helps.
   std::vector<const placed*> candidates;
   for (const auto& p : plan)
     if (p.size > 0 && p.size <= int64_t{64} * 1024)
@@ -271,7 +251,7 @@ sample_says_compress(const std::string& path, const compression_settings& cs) ->
   std::vector<std::size_t> sizes;
   std::string error;
   std::vector<char> buffer;
-  // The trainer wants a decent multiple of the dictionary size to work from.
+  // The trainer wants a multiple of the dictionary size to work from.
   const auto budget = cs.dictionary_size * 100;
   for (std::size_t i = 0; i < candidates.size() && std::ssize(blob) < budget;
        i += stride)
@@ -293,14 +273,13 @@ sample_says_compress(const std::string& path, const compression_settings& cs) ->
       sizes.data(),
       static_cast<unsigned>(sizes.size()));
   if (ZDICT_isError(produced))
-    return {}; // not enough material to learn from; carry on without one
+    return {}; // not enough material; carry on without one
   dict.resize(produced);
   return dict;
 }
 
-//! Compresses a payload too large to stage in memory, straight into the
-//! mapping. Returns the stored size, or -1 if the result would not be smaller
-//! than the input, in which case the caller stores the raw bytes instead.
+//! For payloads too large to stage. Returns the stored size, or -1 if it
+//! would not be smaller than the input.
 [[nodiscard]] auto stream_compress_into(
     const std::string& path,
     int64_t size,
@@ -365,13 +344,10 @@ sample_says_compress(const std::string& path, const compression_settings& cs) ->
 
 namespace
 {
-//! Places every payload, compressing where it pays. Returns the number of
-//! bytes of data region used.
-//!
-//! Work is done in batches so that memory stays bounded by the batch rather
-//! than by the archive, and offsets are assigned sequentially in sorted order
-//! within each batch, which keeps the output byte-for-byte reproducible even
-//! though the compression itself runs in parallel.
+//! Places every payload, compressing where it pays; returns bytes of data
+//! region used. Batched so memory stays bounded by the batch, with offsets
+//! assigned in sorted order so the output is reproducible despite the
+//! parallelism.
 template <typename OnError>
 auto place_compressed(
     std::vector<placed>& plan,
@@ -396,10 +372,9 @@ auto place_compressed(
   (void)on_error;
   throw no_zstd_error("compression");
 #else
-  // Blocks are reserved ahead of the cursor, in chunks, because the final size
-  // is only known once every payload has been compressed. Writing through the
-  // mapping into a hole that the filesystem cannot fill is a SIGBUS, not an
-  // error return, so this has to happen before the bytes are stored.
+  // Reserved ahead of the cursor in chunks: the final size is unknown until
+  // everything is compressed, and writing into a hole the filesystem cannot
+  // fill is a SIGBUS rather than an error.
   int64_t reserved = 0;
   bool can_reserve = true;
   const auto reserve_through = [&](int64_t data_end)
@@ -422,8 +397,7 @@ auto place_compressed(
 
   while (i < n)
   {
-    // A payload too large to stage goes on its own and is streamed straight
-    // into the mapping, where its offset is already known.
+    // Too large to stage: streamed on its own, at a known offset.
     if (plan[static_cast<std::size_t>(i)].shares_with >= 0)
     {
       i++; // placed by the entry it shares with
@@ -439,8 +413,8 @@ auto place_compressed(
       int64_t written = -1;
       if (try_it)
       {
-        // Aligning as if compressed; if it falls back to store the offset is
-        // still 64-byte aligned because compressed alignment divides it.
+        // Aligned as if compressed; a fallback to store is still 64-byte
+        // aligned because that alignment divides it.
         const int64_t at = round_up(offset, payload_alignment);
         std::string error;
         try
@@ -457,14 +431,12 @@ auto place_compressed(
         }
         catch (const out_of_space&)
         {
-          throw; // about the archive, not about this input
+          throw; // about the archive, not this input
         }
         catch (const std::exception& ex)
         {
           // stream_compress_into opens the source itself, so an unreadable or
-          // vanished input surfaces here rather than through read_file. Left
-          // unhandled it escaped as a bare runtime_error, losing the per-file
-          // list the caller needs.
+          // vanished input surfaces here rather than through read_file.
           on_error(p, ex.what());
           i++;
           continue;
@@ -540,10 +512,8 @@ auto place_compressed(
             return;
           }
 
-          // Everything below runs on a worker thread, where an escaping
-          // exception means std::terminate. The staging and compression
-          // buffers are the size of the payload, so std::bad_alloc here is not
-          // hypothetical: it is what a large batch under memory pressure does.
+          // Runs on a worker thread, where an escaping exception means
+          // std::terminate. The buffers here are the size of the payload.
           try
           {
             std::vector<char> raw;
@@ -605,8 +575,7 @@ auto place_compressed(
           }
         });
 
-    // Offsets in sorted order, so the layout does not depend on which thread
-    // finished first.
+    // Sorted order, so the layout does not depend on thread scheduling.
     for (int64_t k = 0; k < count; k++)
     {
       auto& p = plan[static_cast<std::size_t>(i + k)];
@@ -619,8 +588,7 @@ auto place_compressed(
       p.stored_size = std::ssize(staging[static_cast<std::size_t>(k)]);
       offset += p.stored_size;
     }
-    // Every offset in this batch is known now, so the blocks behind them can
-    // be reserved in one go before any worker stores a byte.
+    // All offsets known, so reserve before any worker stores a byte.
     reserve_through(offset);
 
     parallel_for(
@@ -735,8 +703,7 @@ void writer::commit(std::string_view path)
     std::vector<std::size_t> order(n);
     for (std::size_t i = 0; i < n; i++)
       order[i] = i;
-    // A stable sort keeps equal paths in registration order, so within a run
-    // of duplicates the last element is the most recent registration.
+    // Stable, so within a run of duplicates the last is the most recent.
     std::stable_sort(
         order.begin(),
         order.end(),
@@ -776,9 +743,8 @@ void writer::commit(std::string_view path)
   }
 
   // ---------------------------------------------------------------- sizing
-  // Everything is sized before anything is laid out, so that files which
-  // cannot be read are removed from the plan rather than leaving a hole in a
-  // layout that has already been computed.
+  // Sized before anything is laid out, so unreadable files are dropped rather
+  // than leaving a hole in a computed layout.
   std::vector<placed> plan;
   plan.reserve(impl->entries.size());
 
@@ -797,8 +763,8 @@ void writer::commit(std::string_view path)
           {e.path_in_archive, e.path_in_system, "not a regular file"});
       continue;
     }
-    // Only worth a syscall per file when the caller wants unreadable inputs
-    // silently skipped; otherwise the copy will fail and report it anyway.
+    // Only worth a syscall per file under the skip policy; otherwise the copy
+    // reports it anyway.
     if (impl->policy == on_unreadable::skip
         && !platform::readable(e.path_in_system.c_str()))
     {
@@ -835,11 +801,9 @@ void writer::commit(std::string_view path)
   const int64_t n = std::ssize(plan);
   const bool compressing = impl->compress.method != compression::none;
 
-  // The same file can appear under several archive paths, either because the
-  // caller added it twice or because the tree contains hard links. Storing one
-  // copy costs a lookup here and nothing at all at read time: the format never
-  // required payload offsets to be distinct, so two entries can simply point
-  // at the same bytes.
+  // One file can appear under several archive paths, added twice or hard
+  // linked. Payload offsets were never required to be distinct, so entries can
+  // share bytes at no read-time cost.
   {
     std::unordered_map<uint64_t, int64_t> first_by_file;
     first_by_file.reserve(static_cast<std::size_t>(n));
@@ -848,8 +812,7 @@ void writer::commit(std::string_view path)
       auto& p = plan[static_cast<std::size_t>(i)];
       if (p.size == 0)
         continue;
-      // Mixing the two into one key keeps this a single hash lookup; a
-      // collision would only ever be resolved by the check below.
+      // One key, one lookup; a collision is resolved by the check below.
       const uint64_t key = p.device * 0x9e3779b97f4a7c15ull + p.inode;
       const auto [it, inserted] = first_by_file.try_emplace(key, i);
       if (inserted)
@@ -872,17 +835,14 @@ void writer::commit(std::string_view path)
     names_size += std::ssize(p.src->path_in_archive);
     if (p.shares_with >= 0)
       continue; // its bytes are already accounted for
-    // A payload is never stored larger than the file: if compression does not
-    // shrink it, the raw bytes are stored instead. So the uncompressed layout
-    // is an upper bound on the compressed one.
+    // A payload is never stored larger than the file, so the uncompressed
+    // layout is an upper bound.
     worst_case_data = round_up(worst_case_data, payload_alignment) + p.size;
   }
 
-  // Every entry locates its name by a 32-bit offset into one blob. Past 4 GiB
-  // of names those offsets silently wrap, and the archive that comes out is
-  // structurally valid, passes its own index hash, and hands back other
-  // entries' names -- with commit() reporting success. Refusing is the only
-  // honest option, since the field cannot address the data.
+  // Names are located by a 32-bit offset into one blob, so past 4 GiB the
+  // offsets wrap and produce a structurally valid archive holding the wrong
+  // names.
   if (names_size > max_names_size)
     throw std::invalid_argument(
         "uvfs: archive paths total " + std::to_string(names_size)
@@ -917,15 +877,9 @@ void writer::commit(std::string_view path)
     h.data_start = round_up_64(h.index_start + h.index_size);
   }
 
-  // ------------------------------------------------------------- temp file
-  // The archive is built under a temporary name in the destination directory
-  // and renamed into place at the end, so a failure part way through cannot
-  // leave a corrupt archive where a good one used to be.
-  // The temporary has to sit in the destination's own directory so that the
-  // final rename stays within one filesystem and is therefore atomic. Deriving
-  // that directory by searching for '/' silently did the wrong thing on
-  // Windows, where the separator is a backslash: the temporary was created in
-  // the current directory instead, which is not writable in plenty of places.
+  // Built under a temporary name in the destination's own directory and
+  // renamed into place, so a failure cannot leave a corrupt archive and the
+  // rename stays within one filesystem.
   std::filesystem::path out_dir = std::filesystem::path{out}.parent_path();
   if (out_dir.empty())
     out_dir = std::filesystem::path{"."};
@@ -934,36 +888,30 @@ void writer::commit(std::string_view path)
                               + std::to_string(reinterpret_cast<uintptr_t>(&out))))
                               .string();
 
-  // Compression makes the final size unknown until every payload is placed, so
-  // the file is mapped at its uncompressed upper bound and truncated back down
-  // once the real size is known. The unwritten tail is a hole and costs no
-  // blocks. Only the uncompressed path can reserve space up front.
+  // With compression the final size is unknown until every payload is placed,
+  // so the file is sized to the uncompressed upper bound and truncated back
+  // down. The unwritten tail is a hole.
   const int64_t upper_bound = h.data_start + worst_case_data;
 
   std::vector<skipped_file> copy_errors;
   std::mutex errors_mutex;
   std::atomic<bool> had_error{false};
 
-  // Removing the temporary in catch clauses only cleaned up for the exception
-  // types those clauses happened to name: a std::bad_alloc or a
-  // std::length_error escaped both of them and left a full-size file behind,
-  // which for a large archive is a gigabyte of litter. The guard does not need
-  // to know what went wrong.
+  // A guard rather than catch clauses, so cleanup does not depend on naming
+  // the right exception types.
   scope_guard discard_temp{[&] { unlink_quietly(tmp); }};
 
   try
   {
     auto handle = platform::file::create_write(tmp.c_str());
-    // The header, index and dictionary are written through the mapping too, so
-    // they need real blocks behind them just as much as the payloads do.
+    // Written through the mapping too, so they need real blocks.
     handle.reserve(0, h.data_start);
     if (!compressing)
     {
-      // Sizes are final, so the whole thing can be reserved in one call.
+      // Sizes are final, so reserve in one call.
       handle.reserve(h.data_start, worst_case_data);
     }
-    // With compression the final size is not known yet, so the data region is
-    // reserved incrementally as payloads are placed; see place_compressed.
+    // Otherwise reserved incrementally; see place_compressed.
     handle.resize(upper_bound);
 
     int64_t data_used = 0;
@@ -974,9 +922,8 @@ void writer::commit(std::string_view path)
       if (!dictionary.empty())
         memcpy(data.data() + h.dict_start, dictionary.data(), dictionary.size());
 
-      // Called from worker threads, so it must not throw: an exception here
-      // would escape the very handler that exists to stop exceptions escaping.
-      // If even recording the detail fails, the flag still fails the commit.
+      // Called from worker threads, so it must not throw. If recording the
+      // detail fails, the flag still fails the commit.
       const auto record_error = [&](const placed& p, const std::string& why) noexcept
       {
         had_error.store(true, std::memory_order_relaxed);
@@ -998,8 +945,8 @@ void writer::commit(std::string_view path)
       const int threads = impl->threads;
       if (!compressing)
       {
-        // Sizes are already final, so offsets can be assigned up front and
-        // every payload copied straight into its slot in one parallel pass.
+        // Sizes are final, so offsets are assigned up front and every payload
+        // copied into its slot in one pass.
         int64_t offset = 0;
         for (auto& p : plan)
         {
@@ -1029,8 +976,7 @@ void writer::commit(std::string_view path)
                 return;
               }
               // An exception escaping a thread's entry point calls
-              // std::terminate, which is why archiving a live directory used
-              // to abort the process. Failures are recorded, not thrown.
+              // std::terminate, so failures are recorded, not thrown.
               try
               {
                 auto fd = platform::file::open_read(p.src->path_in_system.c_str());
@@ -1067,9 +1013,8 @@ void writer::commit(std::string_view path)
 
       if (!had_error.load(std::memory_order_relaxed) && copy_errors.empty())
       {
-        // Entries sharing a payload adopt the placement of the entry that
-        // actually wrote the bytes. A batch never precedes its own primary,
-        // because the primary is the first occurrence in sorted order.
+        // Sharers adopt the placement of the entry that wrote the bytes; the
+        // primary is the first occurrence in sorted order.
         for (auto& p : plan)
         {
           if (p.shares_with < 0)
@@ -1081,12 +1026,9 @@ void writer::commit(std::string_view path)
           p.content_hash = primary.content_hash;
         }
 
-        // --------------------------------------------------------- index
-        // Written only now, because with compression the stored size and
-        // offset of a payload are not known until it has been placed. The
-        // index is written in its final, ready-to-use form: a sorted entry
-        // array, a populated hash table and a name blob. A reader maps the
-        // file and uses them directly.
+        // Written only now: with compression a payload's size and offset are
+        // not known until it is placed. The result is the finished index a
+        // reader uses directly.
         h.data_size = data_used;
         h.file_size = h.data_start + data_used;
 
@@ -1116,9 +1058,8 @@ void writer::commit(std::string_view path)
           // NOLINTNEXTLINE(bugprone-not-null-terminated-result)
           memcpy(names + p.name_offset, name.data(), name.size());
 
-          // Insert into the open-addressed table. The high 32 bits of the
-          // hash ride along as a fingerprint so a lookup can reject a
-          // colliding slot without dereferencing the entry or the name.
+          // The high 32 bits ride along as a fingerprint, so a lookup can
+          // reject a colliding slot without touching the entry or the name.
           const uint64_t hv = hash_name(name);
           uint64_t slot = hv & mask;
           while (load<uint64_t>(table + slot * 8) != empty_slot)
@@ -1128,10 +1069,8 @@ void writer::commit(std::string_view path)
               ((hv >> 32) << 32) | static_cast<uint64_t>(static_cast<uint32_t>(i)));
         }
 
-        // ----------------------------------------------------- integrity
-        // Order matters: the content hashes live inside the index, the index
-        // hash covers the index, and the header hash covers the header --
-        // including the index hash. So they are written outwards.
+        // Written outwards: content hashes live in the index, the index hash
+        // covers the index, the header hash covers the index hash.
         if (h.has(flag_entry_hashes))
         {
           auto* const hashes = index + h.hashes_offset();
@@ -1145,8 +1084,6 @@ void writer::commit(std::string_view path)
         h.header_hash = hash_bytes(data.data(), header::hashed_prefix);
         store<uint64_t>(data.data() + header::hashed_prefix, h.header_hash);
 
-        // Push our own dirty pages, rather than every dirty page on the
-        // machine, which is what a bare sync() does.
         data.flush(h.file_size);
       }
     } // unmap
@@ -1164,7 +1101,6 @@ void writer::commit(std::string_view path)
       throw commit_error{msg, std::move(copy_errors)};
     }
 
-    // Give back whatever compression saved.
     handle.resize(h.file_size);
     handle.flush();
     handle.close();
@@ -1173,8 +1109,6 @@ void writer::commit(std::string_view path)
       throw std::runtime_error(
           "uvfs: could not publish archive (" + platform::last_error() + "): ");
 
-    // The archive is in place under its final name; there is no temporary
-    // left to remove.
     discard_temp.dismiss();
   }
   catch (const commit_error&)
@@ -1183,11 +1117,11 @@ void writer::commit(std::string_view path)
   }
   catch (const std::runtime_error& e)
   {
-    // Messages here end in ": " by convention and are about the output, which
-    // is the only thing left that can fail once per-input errors are collected.
+    // These end in ": " by convention and concern the output, the only thing
+    // left that can fail once per-input errors are collected.
     throw std::runtime_error(std::string(e.what()).append(out));
   }
-  // Every other exception type propagates unchanged, and the guard still runs.
+  // Anything else propagates; the guard still runs.
 }
 
 }

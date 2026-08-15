@@ -10,9 +10,8 @@
 
 using namespace uvfs::test;
 
-// R5: a file removed between add_file() and commit() used to throw inside a
-// worker thread, which calls std::terminate. Archiving a live tree -- a build
-// directory, a working copy -- hit this routinely.
+// A file removed between add_file() and commit() must not take the process
+// down with it: archiving a live tree hits this routinely.
 UVFS_TEST("writer/vanished_file_is_reported_not_fatal")
 {
   scratch_dir dir{"vanish"};
@@ -66,7 +65,7 @@ UVFS_TEST("writer/vanished_file_can_be_skipped")
   CHECK(!r.find("/vanish").has_value());
 }
 
-// R6: an unreadable file used to abort the process the same way.
+// Same for a file that cannot be read.
 UVFS_TEST("writer/unreadable_file_is_reported_not_fatal")
 {
   scratch_dir dir{"unreadable"};
@@ -117,8 +116,7 @@ UVFS_TEST("writer/directory_input_is_not_archived")
 
 UVFS_TEST("writer/missing_file_is_not_stored_as_empty")
 {
-  // stat() used to be called without checking its result, so a missing file
-  // silently became a zero-length entry.
+  // A missing file must be an error, not a zero-length entry.
   scratch_dir dir{"missing-src"};
   const auto arc = dir / "out.uvfs";
 
@@ -127,8 +125,8 @@ UVFS_TEST("writer/missing_file_is_not_stored_as_empty")
   CHECK_THROWS(w.commit(arc));
 }
 
-// R3: add_file() took a string_view but handed .data() to stat(), reading past
-// the end of the view whenever it was a prefix of a longer buffer.
+// A string_view that is a prefix of a longer buffer must not be read past
+// its end.
 UVFS_TEST("writer/string_view_arguments_are_not_over_read")
 {
   scratch_dir dir{"sv"};
@@ -252,11 +250,9 @@ UVFS_TEST("writer/many_threads_many_files")
 #if defined(UVFS_HAS_ZSTD)
 UVFS_TEST("writer/large_unreadable_input_is_reported_like_any_other")
 {
-  // Payloads bigger than the staging batch take a separate streaming path, and
-  // that path opened the source file outside any try/catch. A permission error
-  // there escaped as a bare runtime_error instead of commit_error, so the
-  // caller lost the per-file list, and the blanket "append the output path"
-  // handler made the message name the archive rather than the input at fault.
+  // Payloads bigger than the staging batch take the streaming path, which must
+  // report a failure the same way as any other: commit_error, carrying the
+  // input at fault rather than naming the archive.
   scratch_dir dir{"bigunreadable"};
   const auto arc = dir / "out.uvfs";
 

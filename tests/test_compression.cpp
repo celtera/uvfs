@@ -84,9 +84,8 @@ UVFS_TEST("compression/roundtrips_every_payload")
 
 UVFS_TEST("compression/automatic_declines_on_incompressible_data")
 {
-  // The point of the automatic policy: media that is already compressed keeps
-  // its zero-copy pointer instead of paying for a decompression step that
-  // buys nothing.
+  // Already-compressed media keeps its zero-copy pointer rather than paying
+  // for a decompression step that buys nothing.
   scratch_dir dir{"zauto"};
   const auto arc = dir / "out.uvfs";
 
@@ -144,9 +143,8 @@ UVFS_TEST("compression/automatic_declines_on_incompressible_data")
 UVFS_TEST("compression/min_gain_threshold_is_respected")
 {
   scratch_dir dir{"zgain"};
-  // Content that compresses by a real but modest amount: three quarters of it
-  // is incompressible noise, the rest is a repeated block. Sprinkling single
-  // bytes through noise would not compress at all, which would test nothing.
+  // Compresses by a real but modest amount: three quarters noise, the rest a
+  // repeated block.
   std::string data;
   {
     const auto noise = incompressible(75000, 11);
@@ -316,8 +314,7 @@ UVFS_TEST("compression/content_hashes_cover_stored_bytes")
 
 UVFS_TEST("compression/output_is_reproducible")
 {
-  // Compression runs in parallel, but offsets are assigned in sorted order, so
-  // two runs over the same inputs must produce identical bytes.
+  // Compression runs in parallel but offsets are assigned in sorted order.
   scratch_dir dir{"zrepro"};
   uvfs::compression_settings cs;
   cs.method = uvfs::compression::automatic;
@@ -407,8 +404,7 @@ UVFS_TEST("compression/large_incompressible_payload_is_stored")
 
 UVFS_TEST("compression/archive_shrinks_to_fit")
 {
-  // The file is mapped at its uncompressed upper bound and truncated back
-  // down; the published archive must not carry that slack around.
+  // Sized to the uncompressed upper bound and truncated back down.
   scratch_dir dir{"ztrunc"};
   const auto arc = dir / "out.uvfs";
   uvfs::writer w;
