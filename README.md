@@ -247,8 +247,8 @@ Compression is CPU-bound and uses every thread available.
 - 2³¹−2 files per archive.
 - 65535 bytes per path, and 4 GiB of archive paths in total (a 32-bit offset
   per entry into one name blob). Both are enforced at write time.
-- POSIX only. `mmap`, `pread`, `copy_file_range`; there is no Windows backend,
-  so MSVC and MinGW are not built or tested. Cygwin would work but is untried.
+- Linux, macOS, FreeBSD, Windows, Emscripten and generic POSIX are supported.
+  OpenBSD and NetBSD build on the generic path.
 - Little-endian only, checked at compile time.
 - No metadata: no mode, mtime, ownership, symlinks or directories.
 - Payloads are shared between entries that name the same file (same inode) or
@@ -270,6 +270,8 @@ Built and tested in CI on every push:
 | libc | glibc and musl (Alpine), x86_64 and arm64 |
 | macOS | arm64 (latest) and x86_64 (13) |
 | BSD | FreeBSD, OpenBSD, NetBSD |
+| Windows | MSVC x86_64 and arm64, MinGW (run under wine) |
+| WebAssembly | Emscripten, run under node |
 | Standards | C++20, C++23, C++26 |
 | Sanitizers | ASan, UBSan, TSan, valgrind, `_GLIBCXX_DEBUG` |
 
@@ -280,8 +282,11 @@ round trip across every compression setting, installed-package and
 the little-endian guard actually fires on s390x rather than silently writing
 byte-swapped archives.
 
-Windows is the notable gap: uvfs is built on `mmap` and `pread`, and there is
-no Win32 backend yet, so there is nothing for MSVC to compile.
+Each platform gets its own fastest primitives rather than a common denominator:
+`copy_file_range` on Linux and FreeBSD, `F_PREALLOCATE` and `F_FULLFSYNC` on
+macOS, `CreateFileMapping` and positioned `ReadFile` on Windows. Emscripten has
+no writable shared mapping at all, so archives are staged in memory and written
+out; the writer does not know the difference.
 
 ## Licence
 
