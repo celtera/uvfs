@@ -142,6 +142,7 @@ if(UVFS_BUILD_TESTS)
     tests/test_dedup.cpp
     tests/test_oom.cpp
     tests/test_cleanup.cpp
+    tests/test_enospc.cpp
   )
   target_link_libraries(uvfs_tests
     PRIVATE uvfs_reader uvfs_writer $<BUILD_INTERFACE:uvfs_build_settings>)
@@ -157,6 +158,13 @@ if(UVFS_BUILD_TESTS)
   target_include_directories(uvfs_tests SYSTEM PRIVATE ${UVFS_XXHASH_INC})
   # Runs one commit under an RLIMIT_AS cap in its own process, so that a
   # std::terminate inside a worker is observable instead of fatal to the suite.
+  add_executable(uvfs_enospc_commit tests/enospc_commit.cpp)
+  target_link_libraries(uvfs_enospc_commit
+    PRIVATE uvfs_writer $<BUILD_INTERFACE:uvfs_build_settings>)
+  add_dependencies(uvfs_tests uvfs_enospc_commit)
+  target_compile_definitions(uvfs_tests PRIVATE
+    UVFS_ENOSPC_HELPER="$<TARGET_FILE:uvfs_enospc_commit>")
+
   add_executable(uvfs_oom_commit tests/oom_commit.cpp)
   target_link_libraries(uvfs_oom_commit
     PRIVATE uvfs_writer $<BUILD_INTERFACE:uvfs_build_settings>)

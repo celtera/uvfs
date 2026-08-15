@@ -396,15 +396,32 @@ namespace
 //! though the compression itself runs in parallel.
 template <typename OnError>
 auto place_compressed(
-    std::vector<placed>& plan, char* payloads, int dst_fd, int64_t data_base,
-    const std::vector<char>& dictionary, const compression_settings& cs,
-    bool want_hashes, int threads, OnError&& on_error) -> int64_t
+    std::vector<placed>& plan, char* payloads, const fd_handle& out,
+    int64_t data_base, const std::vector<char>& dictionary,
+    const compression_settings& cs, bool want_hashes, int threads,
+    OnError&& on_error) -> int64_t
 {
 #if !defined(UVFS_HAS_ZSTD)
-  (void)plan; (void)payloads; (void)dst_fd; (void)data_base; (void)dictionary;
+  (void)plan; (void)payloads; (void)out; (void)data_base; (void)dictionary;
   (void)cs; (void)want_hashes; (void)threads; (void)on_error;
   throw no_zstd_error("compression");
 #else
+  const int dst_fd = out.get();
+
+  // Blocks are reserved ahead of the cursor, in chunks, because the final size
+  // is only known once every payload has been compressed. Writing through the
+  // mapping into a hole that the filesystem cannot fill is a SIGBUS, not an
+  // error return, so this has to happen before the bytes are stored.
+  int64_t reserved = 0;
+  bool can_reserve = true;
+  const auto reserve_through = [&](int64_t data_end)
+  {
+    if (!can_reserve || data_end <= reserved)
+      return;
+    const int64_t grow_to = std::max(data_end, reserved + (int64_t{32} << 20));
+    can_reserve = out.reserve_range(data_base + reserved, grow_to - reserved);
+    reserved = grow_to;
+  };
   const int64_t n = std::ssize(plan);
   cdict_ptr cdict{nullptr, &ZSTD_freeCDict};
   if (!dictionary.empty())
@@ -438,6 +455,7 @@ auto place_compressed(
         // Aligning as if compressed; if it falls back to store the offset is
         // still 64-byte aligned because compressed alignment divides it.
         const int64_t at = round_up(offset, payload_alignment);
+        reserve_through(at + p.size);
         std::string error;
         written = stream_compress_into(
             p.src->path_in_system, p.size, payloads + at, p.size, cs, cdict.get(),
@@ -467,6 +485,7 @@ auto place_compressed(
       const int64_t at = round_up(offset, payload_alignment);
       try
       {
+        reserve_through(at + p.size);
         auto fd = fd_handle::open_ro(p.src->path_in_system.c_str());
         copy_payload(fd, dst_fd, data_base + at, payloads + at, p.size);
         p.data_offset = at;
@@ -581,6 +600,9 @@ auto place_compressed(
       p.stored_size = std::ssize(staging[static_cast<std::size_t>(k)]);
       offset += p.stored_size;
     }
+    // Every offset in this batch is known now, so the blocks behind them can
+    // be reserved in one go before any worker stores a byte.
+    reserve_through(offset);
 
     parallel_for(
         count, threads,
@@ -906,8 +928,16 @@ void writer::commit(std::string_view path)
   try
   {
     auto handle = fd_handle::create_rw(tmp.c_str(), 0644);
+    // The header, index and dictionary are written through the mapping too, so
+    // they need real blocks behind them just as much as the payloads do.
+    handle.reserve_range(0, h.data_start);
     if (!compressing)
-      handle.reserve_space(upper_bound);
+    {
+      // Sizes are final, so the whole thing can be reserved in one call.
+      handle.reserve_range(h.data_start, worst_case_data);
+    }
+    // With compression the final size is not known yet, so the data region is
+    // reserved incrementally as payloads are placed; see place_compressed.
     handle.resize(upper_bound);
 
     int64_t data_used = 0;
@@ -998,8 +1028,8 @@ void writer::commit(std::string_view path)
       else
       {
         data_used = place_compressed(
-            plan, payloads, handle.get(), h.data_start, dictionary,
-            impl->compress, impl->content_hashes, impl->threads, record_error);
+            plan, payloads, handle, h.data_start, dictionary, impl->compress,
+            impl->content_hashes, impl->threads, record_error);
       }
 
       if (!had_error.load(std::memory_order_relaxed) && copy_errors.empty())

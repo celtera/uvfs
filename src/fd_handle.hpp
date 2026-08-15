@@ -103,16 +103,31 @@ public:
           "uvfs: could not resize (" + errno_string(errno) + "): ");
   }
 
-  // Reserves blocks up front so that running out of space is reported here, as
-  // an error, rather than as a SIGBUS when a dirty page of the mapping is
-  // written back. Not all filesystems implement it; a refusal is not fatal.
-  void reserve_space(int64_t size) const
+  // Reserves blocks so that running out of space is reported here, as an
+  // error, rather than as a SIGBUS when the mapping is written through: a
+  // store to a page the filesystem cannot back is not something the kernel can
+  // turn into an error return.
+  //
+  // Returns false when the filesystem has no fallocate -- that is not a
+  // failure, just a platform without the guarantee. Genuinely running out of
+  // space throws, which is the case this exists for and which the previous
+  // version discarded along with the rest of the return value.
+  auto reserve_range(int64_t offset, int64_t length) const -> bool
   {
 #if defined(__linux__)
-    if (size > 0)
-      (void)posix_fallocate(handle, 0, size);
+    if (length <= 0)
+      return true;
+    const int rc = ::posix_fallocate(handle, offset, length);
+    if (rc == 0)
+      return true;
+    if (rc == ENOSPC || rc == EDQUOT)
+      throw std::runtime_error(
+          "uvfs: not enough space for the archive (" + errno_string(rc) + "): ");
+    return false; // EOPNOTSUPP and friends: no guarantee available here
 #else
-    (void)size;
+    (void)offset;
+    (void)length;
+    return false;
 #endif
   }
 
