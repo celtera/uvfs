@@ -133,19 +133,26 @@ struct scratch_dir
   }
 };
 
-//! Resident set size in KB, for tests that assert an implementation does not
-//! allocate proportionally to the archive.
+//! Resident set size in KB, or -1 where it cannot be read.
+//!
+//! Only /proc gives a *current* figure; getrusage reports the peak, which is
+//! monotonic and so useless for comparing one operation against another.
+//! Tests that need this skip themselves where it is unavailable rather than
+//! quietly asserting against zero.
 inline auto current_rss_kb() -> long
 {
   FILE* f = std::fopen("/proc/self/statm", "r");
   if (!f)
-    return 0;
+    return -1;
   long total = 0, resident = 0;
-  if (std::fscanf(f, "%ld %ld", &total, &resident) != 2)
-    resident = 0;
+  const bool ok = std::fscanf(f, "%ld %ld", &total, &resident) == 2;
   std::fclose(f);
+  if (!ok)
+    return -1;
   return resident * (sysconf(_SC_PAGESIZE) / 1024);
 }
+
+inline auto have_current_rss() -> bool { return current_rss_kb() >= 0; }
 
 inline auto expected_bytes(std::size_t n, uint64_t seed = 1) -> std::string
 {

@@ -224,6 +224,11 @@ UVFS_TEST("index/open_cost_does_not_scale_with_entry_count")
   // costs the same as opening a small one. Comparing a large archive against a
   // small one isolates that from the fixed cost of a mapping, which is what an
   // absolute threshold would be at the mercy of.
+  if (!have_current_rss())
+  {
+    std::printf("    (no /proc, cannot measure current RSS here; skipping)\n");
+    return;
+  }
   scratch_dir dir{"noalloc"};
   const auto src = dir.make_file("s", 8, 1);
 

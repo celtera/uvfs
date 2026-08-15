@@ -54,18 +54,6 @@ void evict(const std::string& p)
   ::close(fd);
 }
 
-auto rss_kb() -> long
-{
-  FILE* f = std::fopen("/proc/self/statm", "r");
-  if (!f)
-    return 0;
-  long total = 0, resident = 0;
-  if (std::fscanf(f, "%ld %ld", &total, &resident) != 2)
-    resident = 0;
-  std::fclose(f);
-  return resident * (sysconf(_SC_PAGESIZE) / 1024);
-}
-
 template <typename F>
 auto best_of(int reps, F&& f) -> double
 {
@@ -202,7 +190,6 @@ auto main(int argc, char** argv) -> int
 
     // Everything, cold, which is the honest number for a fresh process.
     evict(arc);
-    const auto before = rss_kb();
     const auto t0 = clk::now();
     {
       uvfs::reader rr{arc};
@@ -219,7 +206,6 @@ auto main(int argc, char** argv) -> int
         return 1;
     }
     const double read_all = us(t0, clk::now());
-    (void)before;
 
     std::printf(
         "%-14s %9.1fM %7.1f%% %8.0fms %8.1fus %7.1fns %9.0fus %10.0fms %6ld/%ld\n",

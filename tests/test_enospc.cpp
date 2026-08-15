@@ -62,11 +62,13 @@ auto compression_modes() -> std::vector<const char*>
 #endif
 }
 
+//! Requires unshare(1) and permission to create user + mount namespaces, so
+//! it is Linux-only and not available in every container either. A probe that
+//! actually commits is the only reliable test.
 auto namespaces_available() -> bool
 {
   const auto r = commit_into_small_fs("none", 64, 1, 1);
-  return r.signal == 0 && r.output.find("Permission") == std::string::npos
-         && r.output.find("Operation not permitted") == std::string::npos;
+  return r.signal == 0 && r.exit_code == 0;
 }
 } // namespace
 

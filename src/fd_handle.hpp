@@ -23,13 +23,30 @@ struct out_of_space : std::runtime_error
   using std::runtime_error::runtime_error;
 };
 
+namespace detail
+{
+// strerror_r comes in two incompatible shapes. The XSI one returns int and
+// fills the caller's buffer; the GNU one returns char*, which may or may not
+// point at that buffer. Which one is declared depends on the libc and on
+// feature-test macros, so picking with #ifdef gets it wrong on some
+// combination. Overload resolution just asks the compiler which one it has.
+[[nodiscard]] inline auto from_strerror_r(int rc, const char* buf) -> std::string
+{
+  return rc == 0 ? std::string{buf} : std::string{};
+}
+[[nodiscard]] inline auto from_strerror_r(const char* msg, const char*) -> std::string
+{
+  return msg ? std::string{msg} : std::string{};
+}
+} // namespace detail
+
 [[nodiscard]] inline auto errno_string(int e) -> std::string
 {
   char buf[256] = {};
-  // GNU strerror_r may return a pointer to its own buffer rather than filling
-  // the one it was given.
-  const char* msg = strerror_r(e, buf, sizeof buf);
-  return msg ? std::string(msg) : std::string("errno ") + std::to_string(e);
+  auto msg = detail::from_strerror_r(::strerror_r(e, buf, sizeof buf), buf);
+  if (msg.empty())
+    msg = "errno " + std::to_string(e);
+  return msg;
 }
 
 template<typename T>
