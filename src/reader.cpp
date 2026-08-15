@@ -204,6 +204,15 @@ try : impl{std::make_unique<struct impl>(path)}
   if (h.has(flag_has_dictionary))
   {
 #if defined(UVFS_HAS_ZSTD)
+    // Checked unconditionally rather than by integrity level: a damaged
+    // dictionary corrupts every entry that uses it, and no other check in the
+    // archive can see it. Dictionaries are small, so this costs a few
+    // microseconds and only for archives that carry one.
+    if (impl->h.dict_hash
+        != hash_bytes(base + h.dict_start, static_cast<std::size_t>(h.dict_size)))
+      throw std::runtime_error(
+          "uvfs: dictionary checksum mismatch, the archive is damaged: ");
+
     impl->ddict.reset(ZSTD_createDDict(
         base + h.dict_start, static_cast<std::size_t>(h.dict_size)));
     if (!impl->ddict)
@@ -363,9 +372,10 @@ auto reader::verify() const -> std::vector<std::string>
   {
     const entry e = impl->checked_entry_at(i);
     const auto want = load<uint64_t>(impl->hashes + i * 8);
-    // Hash the bytes as they sit in the archive: that detects damage without
-    // paying for decompression, and a compressed payload that survives its
-    // hash decompresses to the right thing.
+    // Hash the bytes as they sit in the archive, which detects damage without
+    // paying for decompression. Note this covers the payload only: what a
+    // compressed payload decodes *to* also depends on the dictionary, which is
+    // why that has a checksum of its own, verified at open.
     const auto got = hash_bytes(
         impl->payloads + e.data_offset, static_cast<std::size_t>(e.stored_size));
     if (got != want)

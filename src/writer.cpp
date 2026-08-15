@@ -837,6 +837,7 @@ void writer::commit(std::string_view path)
   if (!dictionary.empty())
   {
     h.flag_bits |= flag_has_dictionary;
+    h.dict_hash = hash_bytes(dictionary.data(), dictionary.size());
     h.dict_start = round_up_8(h.index_start + h.index_size);
     h.dict_size = std::ssize(dictionary);
     h.data_start = round_up_64(h.dict_start + h.dict_size);

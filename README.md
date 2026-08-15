@@ -128,10 +128,15 @@ everything at open would throw away the one thing the format is for:
 
 | level                    | what it checks                        | cost on a 466 MB archive |
 | ------------------------ | ------------------------------------- | -----------------------: |
-| `header_only` *(default)*| the 128-byte header                   |                   `3 µs` |
+| `header_only` *(default)*| the 128-byte header, and the dictionary if present |      `3 µs` |
 | `index`                  | \+ entries, hash table, names          |                 `175 µs` |
 | `full`                   | \+ each payload as it is read          |    proportional to reads |
 | `verify()`               | every payload, on demand               |                 `32.7 ms`|
+
+The dictionary is not on that ladder: it is checked at open whatever the level,
+because every entry that uses it depends on it, and a damaged dictionary
+changes what those entries decode to without touching a single stored byte that
+any other checksum covers.
 
 Memory safety never depends on any of this: index entries are bounds-checked
 where they are used, at every level. The levels buy detection of corruption that

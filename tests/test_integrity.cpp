@@ -274,3 +274,93 @@ UVFS_TEST("integrity/lookup_terminates_when_the_table_has_no_empty_slot")
     found += r2.stat(r2.at(i).path).has_value();
   CHECK(found >= 1);
 }
+
+#if defined(UVFS_HAS_ZSTD)
+UVFS_TEST("integrity/dictionary_damage_is_detected")
+{
+  // The dictionary is the one region that every entry using it depends on, so
+  // damage there is not confined to one payload: it silently changes what
+  // every zstd_dict entry decodes to. Nothing else in the archive can notice,
+  // because content hashes cover the *stored* bytes, which are untouched.
+  scratch_dir dir{"dictdamage"};
+  const auto arc = dir / "out.uvfs";
+
+  auto text = [](int i)
+  {
+    std::string s;
+    while (s.size() < 400)
+      s += "record " + std::to_string(i) + " field alpha beta gamma delta; ";
+    return s;
+  };
+
+  uvfs::writer w;
+  uvfs::compression_settings cs;
+  cs.method = uvfs::compression::always;
+  cs.level = 9;
+  cs.min_size = 0;
+  cs.dictionary_size = 16 * 1024;
+  w.set_compression(cs);
+  for (int i = 0; i < 600; i++)
+    w.add_file("/r" + std::to_string(i), dir.make_text("s" + std::to_string(i), text(i)));
+  w.commit(arc);
+
+  const auto pristine = slurp(arc);
+  const auto h = uvfs::header::load_from(pristine.data());
+  CHECK(h.dict_size > 0);
+  if (h.dict_size <= 0)
+    return;
+
+  // Record what an undamaged archive says, so "silently wrong" can be told
+  // apart from "correctly refused".
+  std::vector<std::string> expected;
+  {
+    uvfs::reader r{arc};
+    for (int64_t i = 0; i < r.count(); i++)
+    {
+      auto got = r.read(r.at(i).path);
+      expected.emplace_back(got ? std::string(got->begin(), got->end()) : "");
+    }
+  }
+
+  int silently_wrong = 0, detected = 0, unaffected = 0;
+  const auto bad = dir / "bad.uvfs";
+  for (int trial = 0; trial < 64; trial++)
+  {
+    auto bytes = pristine;
+    const auto off = static_cast<std::size_t>(
+        h.dict_start + (trial * 7919) % h.dict_size);
+    bytes[off] = static_cast<char>(bytes[off] ^ (1u << (trial % 8)));
+    if (bytes == pristine)
+      continue;
+    spit(bad, bytes);
+
+    try
+    {
+      // integrity::full is the strongest setting a caller can ask for.
+      uvfs::reader r{bad, uvfs::integrity::full};
+      bool differs = false;
+      for (int64_t i = 0; i < r.count(); i++)
+      {
+        auto got = r.read(r.at(i).path);
+        const std::string s = got ? std::string(got->begin(), got->end()) : "";
+        if (s != expected[static_cast<std::size_t>(i)])
+          differs = true;
+      }
+      if (differs)
+        silently_wrong++;
+      else
+        unaffected++;
+    }
+    catch (const std::exception&)
+    {
+      detected++;
+    }
+  }
+  std::printf(
+      "    (%d silently wrong, %d detected, %d unaffected)\n", silently_wrong,
+      detected, unaffected);
+
+  // Damage must never turn into wrong bytes handed back as if they were right.
+  CHECK_EQ(silently_wrong, 0);
+}
+#endif

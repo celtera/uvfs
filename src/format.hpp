@@ -178,6 +178,13 @@ struct header
   int64_t dict_start{};
   int64_t dict_size{};
   uint64_t index_hash{};
+  //! XXH3 of the dictionary region. The dictionary is the one part of an
+  //! archive that every entry using it depends on, so damage there is not
+  //! confined to a single payload: it silently changes what every zstd_dict
+  //! entry decodes to. Nothing else can catch it -- the header hash stops at
+  //! byte 120, the index hash covers only the index, and per-entry content
+  //! hashes cover the stored bytes, which a damaged dictionary leaves intact.
+  uint64_t dict_hash{};
   uint64_t header_hash{};
 
   //! Byte range covered by header_hash: everything up to the field itself.
@@ -199,6 +206,7 @@ struct header
     h.dict_start = uvfs::load<int64_t>(p + 80);
     h.dict_size = uvfs::load<int64_t>(p + 88);
     h.index_hash = uvfs::load<uint64_t>(p + 96);
+    h.dict_hash = uvfs::load<uint64_t>(p + 104);
     h.header_hash = uvfs::load<uint64_t>(p + 120);
     return h;
   }
@@ -219,6 +227,7 @@ struct header
     uvfs::store<int64_t>(p + 80, dict_start);
     uvfs::store<int64_t>(p + 88, dict_size);
     uvfs::store<uint64_t>(p + 96, index_hash);
+    uvfs::store<uint64_t>(p + 104, dict_hash);
     uvfs::store<uint64_t>(p + 120, header_hash);
   }
 
