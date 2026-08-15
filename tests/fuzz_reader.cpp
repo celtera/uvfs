@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <vector>
 #include <unistd.h>
 
 namespace
@@ -63,6 +64,11 @@ extern "C" auto LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) -> int
           return true;
         });
 
+    // Reading is fuzzed too. The original target stopped at find(), which
+    // only ever hands back a pointer into the mapping -- so the entire
+    // decompression path, and every size the index claims about it, went
+    // unexercised. That is exactly where an unbounded allocation was hiding.
+    std::vector<char> buffer;
     for (int64_t i = 0; i < r.count(); i++)
     {
       const auto info = r.at(i);
@@ -71,6 +77,32 @@ extern "C" auto LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) -> int
       // that are guaranteed to be present.
       (void)r.stat(info.path);
       (void)r.find(info.path);
+
+      // A refusal is the correct outcome for a corrupt entry, so failures are
+      // swallowed per entry rather than abandoning the rest of the archive.
+      // The cap keeps a legitimately large claim from being reported as an
+      // out-of-memory finding; anything past it is the allocation bound's
+      // problem, and there is a unit test for that.
+      constexpr int64_t read_cap = 64 << 20;
+      if (info.size < 0 || info.size > read_cap)
+        continue;
+      try
+      {
+        if (auto whole = r.read(info.path))
+          sink += whole->size();
+      }
+      catch (const std::exception&)
+      {
+      }
+      try
+      {
+        buffer.assign(static_cast<std::size_t>(info.size), '\0');
+        if (auto n = r.read_into(info.path, buffer.data(), std::ssize(buffer)))
+          sink += static_cast<std::size_t>(*n);
+      }
+      catch (const std::exception&)
+      {
+      }
     }
 
     // Lookups that miss must terminate rather than probe forever.
