@@ -32,7 +32,7 @@ jobs:
     name: libFuzzer (reader)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -60,7 +60,7 @@ jobs:
           ls -l corpus
 
       - name: Restore the accumulated corpus
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: corpus-cache
           key: uvfs-fuzz-corpus-${{ github.run_id }}
@@ -91,7 +91,7 @@ jobs:
 
       - name: Save the corpus for the next run
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: corpus-cache
           key: uvfs-fuzz-corpus-${{ github.run_id }}
@@ -115,7 +115,7 @@ jobs:
     name: Mutation sweep
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - name: Install dependencies
