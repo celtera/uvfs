@@ -43,7 +43,7 @@ jobs:
           - { name: "macOS x86_64", os: macos-15-intel, cxx: clang++ }
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -100,7 +100,7 @@ jobs:
           apt-get update -qq
           apt-get install -y -qq git cmake ninja-build libzstd-dev g++ ca-certificates
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -124,7 +124,7 @@ jobs:
     name: clang-${{ matrix.version }} ${{ matrix.stdlib }} C++${{ matrix.std }}
     runs-on: ubuntu-latest
     container:
-      image: ubuntu:noble
+      image: ubuntu:resolute
     strategy:
       fail-fast: false
       matrix:
@@ -145,7 +145,7 @@ jobs:
             apt-get install -y -qq libc++-${{ matrix.version }}-dev libc++abi-${{ matrix.version }}-dev || true
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -181,7 +181,7 @@ jobs:
           - { arch: x86_64, runner: ubuntu-latest }
           - { arch: arm64, runner: ubuntu-24.04-arm }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -204,7 +204,7 @@ jobs:
     name: Without zstd
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -241,7 +241,7 @@ jobs:
     name: LTO and installed-package consumption
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -314,7 +314,7 @@ jobs:
           - { name: "MSVC x86_64", os: windows-latest, gen: "" }
           - { name: "MSVC arm64", os: windows-11-arm, gen: "" }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -336,7 +336,7 @@ jobs:
     name: MinGW x86_64
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -374,11 +374,11 @@ jobs:
     name: Emscripten (wasm)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
-      - uses: mymindstorm/setup-emsdk@v14
+      - uses: mymindstorm/setup-emsdk@v16
         with:
           version: latest
 
